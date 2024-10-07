@@ -1,2 +1,2 @@
 # msc-thesis
-Master's thesis
+my master's thesis files
