@@ -1,0 +1,2048 @@
+\chapter{Realizzazione di NextPyter \textit{"2.0"}}
+In questo capitolo verrà effettuata l'analisi tecnica dei componenti software del progetto NextPyter \textit{"2.0"}.
+\newline
+Saranno discussi, con codice e altri riferimenti, tutti i componenti \textit{core} e di autenticazione citati nella fase di progettazione, dando ampio spazio ad approfondimenti e commenti. 
+\section{Rust come linguaggio di programmazione}
+È stato scelto \textit{Rust}\footnote{https://rustlang.org} come linguaggio di programmazione per tutti i componenti di basso livello all'interno del \textit{core} di NextPyter per motivazioni riguardanti, principalmente, \textbf{prestazioni}, \textbf{\textit{type system} flessibile} e \textbf{facilità di distribuzione}. 
+\newline
+Rust è uno dei linguaggi più in diffusione del momento \cite{stackoverflow-2024}, possiede un ecosistema ricco di parecchie librerie che sfruttano le più recenti tecnologie in ambito di \textit{networking} e programmazione di sistema, offrendo moderni e affidabili strumenti per la soluzione di problemi in questi ambiti.
+\newline
+Grazie ad un moderno \textit{type system}, Rust è un linguaggio che permette di esprimere le relazioni fra i componenti di un programma in maniera estremamente chiara e, soprattutto, \textbf{type safe}. Questo significa che un programma compilato in Rust, che non fa uso di \textit{unsafe code}\footnote{https://doc.rust-lang.org/book/ch19-01-unsafe-rust.html}, ha la garanzia di non avere problemi riguardanti la null-safety e altri errori runtime riguardanti la gestione della memoria. Sempre grazie a queste \textit{feature}, Rust è in grado di garantire una velocità di esecuzione estremamente elevata, specialmente in ambienti riguardanti operazioni basate sull'I/O intensivo (come le applicazioni web) \cite{rust-perf}.
+\newline
+Siccome NextPyter riceverà potenzialmente parecchio traffico, è importante garantire che il suo ciclo di sviluppo sia quanto più lineare e riproducibile possibile e che gli applicativi che ne conseguiranno siano quanto più veloci possibili, garantendo i vincoli di resilienza e scalabilità di cui si parlava durante la fase di progettazione.
+\newline
+In conclusione, per via della mole di traffico che la piattaforma trattata è volta ad affrontare e dato il ruolo che i componenti \textit{core} andranno a ricoprire, le qualità di un linguaggio come Rust non andranno sprecate, anzi, brilleranno per la loro utilità in un sistema come NextPyter.
+\section{Modulo \textit{daemon}}
+In questa sezione verrà descritta la composizione del modulo \textit{daemon} di NextPyter, il componente di "rappresentanza", come già detto, di tutto il \textit{core}, ovvero quello che permetterà di interagire con le funzionalità della piattaforma.
+\newline
+La filosofia fondamentale alla base di questo componente è la sua \textit{statelessness}, ovvero la completa assenza di stato al suo interno, la cui gestione è delegata a componenti competenti. È molto importante capire che un componente così di facciata in un sistema del genere, deve essere in grado di gestire una quantità di traffico altamente variabile, quindi deve poter scalare in maniera completamente indipendente e \textbf{rapida} per garantire una corretta erogazione dei servizi di NextPyter.
+\newline
+Il codice è stato studiato appositamente per essere quanto più performante possibile, introducendo \textit{offloading}, quindi \textbf{delegazione}, di "compiti pesanti" in termini computazionali (come vederemo essere il download di immagini Docker, ad esempio) a componenti dell'architettura appositamente progettati.
+\newline
+In un certo senso, NextPyter è una piattaforma che segue la filosofia \textit{Unix}\footnote{https://en.wikipedia.org/wiki/Unix_philosophy}, predilgendo quindi il minimalismo e la modularità di un sistema, creando "piccoli" programmi che risolvono problemi specifici.
+\newline
+Il codice del modulo è consultabile a questo indirizzo: https://gitlab.com/nextpyter/daemon.
+\subsection{Axum per la creazione di API REST}
+Axum è un framework per la creazione di applicazioni web scritto in Rust, il cui focus sta sulla \textit{modularità} e riutilizzo del codice.
+\newline
+Questo framework, come tantissimi altri nel panorama \textit{Rust}, è basato su \textit{Tokio}\footnote{https://tokio.rs/}, un \textit{runtime} che permette la creazione di \textit{network application} asincrone, sfruttando le ultime tecnologie presenti nei kernel dei moderni sistemi operativi, rafforzando ancora di più le garanzie prestazionali che NextPyter si pone.
+\newline
+La base di tutte le applicazioni Axum è un \textit{router}, un componente dedicato alla gestione del traffico HTTP in arrivo all'applicazione Rust che farà utilizzo della libreria.
+\newline
+Ad un \textit{router} saranno associate più \textit{route}, sostanzialmente degli \textit{endpoint HTTP}, che assoceranno ad un determinato \textit{path}, ovvero un indirizzo, un URL, un determinato \textit{handler}, ovvero una funzione che si occuperà di gestire le richieste riguardanti quell'endpoint in particolare.
+\newline
+A scopo esemplificativo, ecco come è possibile creare una route con Axum:
+\begin{verbatim}
+use axum::{
+    routing::{get, post},
+    http::StatusCode,
+    Json, Router,
+};
+use serde::{Deserialize, Serialize};
+
+#[tokio::main]
+async fn main() {
+
+    // viene creato il router
+    let app = Router::new()
+        // viene registrata la coppia route - handler associata al path "/"
+        .route("/", get(root));
+
+    // viene associata una porta di ascolto 
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+// l'handler della route specificata in precedenza è questo, che ritorna banalmente 
+// un "Hello, World!" a scopo esemplificativo
+async fn root() -> &'static str {
+    "Hello, World!"
+}
+\end{verbatim}
+\newpage
+\subsection{Utilizzo di State per \textit{dependency injection}}
+Per quanto riguarda la gestione delle dipendenze, Axum propone una soluzione particolarmente semplice da implementare, mediante il tipo \verb|State|. In questo modo, sarà possibile offrire, a tutte le route che ne necessiteranno, un oggetto contenente proprietà che possono essere usate per realizzare gli scopi dell'applicazione. In questo oggetto, generalmente, vengono messe le interfacce che regolano l'accesso al database e ad altri componenti "esterni" alle route, ma che queste ultime devono necessariamente interrogare.
+\newline
+A tale scopo, lo \verb|State| del modulo \textit{daemon} ha questo aspetto:
+\begin{verbatim}
+use std::{env, error::Error, sync::Arc};
+use bollard::Docker;
+use rqlite_rs::{RqliteClient, RqliteClientBuilder};
+use serde::Deserialize;
+
+use crate::libs::orchestrator::{...};
+
+#[derive(Clone)]
+pub struct AppState {
+    pub orchestrator: Arc<Box<dyn Orchestrator>>,
+    pub rqlite: Arc<RqliteClient>,
+    pub redis: Option<redis::Client>, 
+    pub images_stream_name: Option<String>,
+}
+
+pub async fn get_orchestrator(name: &str) -> Box<dyn Orchestrator> {
+    match name {
+        "kubernetes" => Box::new(KubernetesOrchestrator::new().await),
+        "docker" => Box::new(DockerOrchestrator::new()),
+        _ => panic!("no orchestrator found with that name!")
+    }
+}
+impl AppState {
+    pub async fn new(orchestrator_name: &str) -> Self {
+
+        let rqlite = RqliteClientBuilder::new()
+            .known_host(env::var("CONFIG_STORE_HOST")
+            .unwrap_or("config-store:4001".to_string()))
+            .auth(
+                env::var("RQLITE_USER").unwrap().as_str(), 
+                env::var("RQLITE_PASSWORD").unwrap().as_str()
+            )
+            .build()
+            .expect("cannot create rqlite client");
+
+        let images_stream_name = {
+            if let Ok(res) = env::var("IMAGES_STREAM_NAME") {
+                Some(res)
+            }else {
+                None
+            }
+        };
+
+        let mut redis = None;
+        if orchestrator_name.eq("docker") {
+            redis = Some(
+                redis::Client::open(env::var("REDIS_URI").unwrap())
+                    .expect("cannot connect to redis")
+            );
+            assert!(images_stream_name.is_some());
+        }
+
+        AppState { 
+            orchestrator: Arc::new(get_orchestrator(orchestrator_name).await),
+            rqlite: Arc::new(rqlite),
+            redis,
+            images_stream_name
+        }
+    }
+}
+\end{verbatim}
+In questa struttura dati, nel caso di NextPyter, è stato deciso di inserire le interfacce con l'orchestratore di container, che potrà essere Kubernetes o Docker (configurabile, come si può vedere, tramite variabili d'ambiente), l'interfaccia con il database distribuito, RQLite e l'interfaccia con \textit{Redis}/\textit{Valkey}, in modo tale che, al bisogno, le route potranno utilizzare questi oggetti per realizzare le logiche interne dettate dall'handler ad esse associate.
+Utilizzare questa struttura dati è molto semplice, basta registrarla nel \textit{Router} (mediante l'apposito metodo \verb|with_state|, al quale viene passato l'oggetto contentente lo stato) e specificarla come argomento nelle \textit{route} che ne hanno necessità nel seguente modo:
+\begin{verbatim}
+pub async fn get_all_notebooks(
+   State(s): State<AppState>,
+) -> ... {
+    s.orchestrator...
+}
+\end{verbatim}
+Notare come lo \verb|State| venga "iniettato" nella route passandolo semplicemente come parametro. Questo paradigma non è da confondere con la dependency injection mediante IoC\footnote{https://www.baeldung.com/inversion-control-and-dependency-injection-in-spring}, come, ad esempio, quella presente in framework simili a Spring: la tecnica utilizzata si basa interamente sulla risoluzione dei tipi passati alle funzioni e tutte le dipendenze vengono risolte a tempo di compilazione, piuttosto che a runtime, garantendo performance straordinarie.
+\newline
+Sebbene non si entrerà nel dettaglio di questo paradigma, è importante sottolineare come questo approccio non solo permetta di \textbf{azzerare} un eventuale \textit{overhead} a runtime, ma riduce notevolmente le dimensioni del binario che si andrà eventualmente ad eseguire dopo la compilazione. Molti progetti basati su Rust fanno leva su questo paradigma: rendere la compilazione più "impegnativa" da un punto di vista computazionale, garantendo, però, performance runtime particolarmente elevate.
+\newline
+A scopo esemplificativo, è possibile vedere come è realizzato questo meccanismo in Axum direttamente dal codice sorgente della libreria\footnote{https://docs.rs/axum/latest/axum/handler/trait.Handler.html#implementors}: il \textit{trait}, un concetto assimilabile a quello di interfaccia per linguaggi OOP, \textit{Handler}, ovvero ciò che permette di definire come una richiesta viene interpretata a runtime, viene definito per \textit{molti tipi di chiamate a funzione}, ovvero \textit{molti tipi di handler}. A tempo di compilazione, per farla breve, il compilatore scansionerà tutti gli handler definiti da chi programma e verificherà che la loro definizione rispecchi una di quelle definite nella libreria; ovviamente questo è un processo abbastanza dispendioso, ma viene fatto a \textit{compile-time}, piuttosto che a \textit{runtime}, quindi viene eseguito una sola volta!
+\newline
+\subsection{Il trait \textit{Orchestrator}} \label{axum-orchestrator}
+Come si può vedere, l'oggetto \verb|Orchestrator| è un \textit{trait}, assimilabile all'equivalente di un'interfaccia nei linguaggi OOP, che espone i seguenti metodi:
+\begin{verbatim}
+#[derive(Error, Debug)]
+pub enum OrchestratorError {
+    #[error("docker error: {0}")]
+    DockerError(bollard::errors::Error),
+    #[error("fatal error: {0}")]
+    Generic(String),
+    #[error("couldn't serialize: {0}")]
+    SerializationError(String),
+    #[error("kubernetes error: {0}")]
+    KubernetesError(String),
+}
+// ... altro codice di contorno
+pub trait Orchestrator: Send + Sync {
+    async fn create_notebook_volume(
+        &self, 
+        container_name: &str, 
+        path: &str
+    ) -> Result<String, OrchestratorError>;
+
+    async fn remove_notebook_volume(
+        &self, 
+        volume_name: &str, 
+    ) -> Result<(), OrchestratorError>;
+
+    async fn start_notebook_container(
+        &self, 
+        container_name: &str,
+        container_image: &str,
+        container_command: Vec<&str>,
+        volume_name: &str,
+        filename: Option<&str>,
+    ) -> Result<String, OrchestratorError>;
+
+    async fn get_all_notebook_containers_paginated(
+        &self, 
+    ) -> Result<Vec<NotebookDescription>, OrchestratorError>;
+
+    async fn get_notebook_container(
+        &self,
+        container_name: &str,
+    ) -> Result<Option<NotebookDescription>, OrchestratorError>;
+
+    async fn stop_notebook_container(
+        &self,
+        container_name: &str
+    ) -> Result<(), OrchestratorError>;
+
+    async fn restart_notebook_container(
+        &self,
+        container_name: &str,
+    ) -> Result<(), OrchestratorError>;
+
+    async fn delete_notebook_container(
+        &self,
+        container_name: &str,
+    ) -> Result<(), OrchestratorError>;
+
+    async fn delete_notebook_container_data(
+        &self,
+        container_volume_name: &str,
+    ) -> Result<(), OrchestratorError>;
+
+}
+\end{verbatim}
+Come si può intuire, questo \textit{trait} verrà poi implementato in base al tipo di orchestratore che si andrà ad utilizzare, infatti esistono due implementazioni, una per Kubernetes e una per Docker:
+\begin{verbatim}
+// implementazione per Kubernetes
+impl Orchestrator for KubernetesOrchestrator {
+    ... 
+    async fn get_notebook_container(
+        &self, 
+        container_name: &str,
+    ) -> Result<Option<NotebookDescription>, OrchestratorError>{
+        let pod_api: Api<Pod> = Api::namespaced(
+            self.runtime.clone(), 
+            &get_k8s_namespace()
+        );
+        let pod = pod_api.get_opt(&container_name).await?;
+        dbg!(&pod);
+        if let None = pod {
+            return Ok(None)
+        }
+
+        Ok(Some(pod.unwrap().try_into()?))
+    }
+
+    ...
+}
+
+// implementazione per Docker
+impl Orchestrator for DockerOrchestrator {
+    async fn get_notebook_container(
+        &self, 
+        container_name: &str,
+    ) -> Result<Option<NotebookDescription>, OrchestratorError>{
+        
+        let result = self.runtime.list_containers(Some(ListContainersOptions {
+            filters: HashMap::from([
+                ("name", vec![container_name]),
+                ("status", vec!["running", "paused", "exited", "dead"])
+            ]),
+            ..Default::default()
+        })).await?;
+        
+        if result.len() == 0 {
+            return Ok(None)
+        }
+        if result.len() > 1 {
+            warn!("{container_name} has been found multiple times?");
+        }
+    
+        let found_container: NotebookDescription = result.first()
+            .unwrap()
+            .try_into()?;
+    
+        Ok(Some(found_container))
+    }
+    ...
+}
+\end{verbatim}
+Anche senza una particolare esperienza con Rust, è facile capire che Orchestrator sarà un'interfaccia che esporrà metodi comuni che verranno utilizzati per astrarre il tipo di orchestratore con il quale \textit{daemon} andrà a comunicare.
+\newline
+Per astrarre le differenze che vi sono fra i due tipi di orchestratori e le loro interfacce, sono stati creati tipi appositi che vanno a "standardizzare" l'accesso alle risorse che servono per il corretto funzionamento del modulo. Sebbene entrambi gli orchestratori, Docker e Kubernetes, regolino le interazioni fatte da client esterni tramite l'utilizzo di una API REST, il formato dei dati è molto diverso, da cui ne deriva l'introduzione dei tipi di cui sopra.\newline
+Il tipo \verb|NotebookDescription|, ad esempio, rappresenta l'implementazione di questo approccio:
+\begin{verbatim}
+#[derive(Serialize, Deserialize, ToSchema)]
+pub struct NotebookDescription {
+    pub notebook_id: String,
+    pub notebook_endpoint: String,
+    pub notebook_status: String,
+    pub notebook_name: String,
+}
+\end{verbatim}
+Il tipo "base" contiene informazioni che tutti i fruitori di questo tipo dovranno andare a poter leggere.
+\newline
+Grazie al moderno \textit{type system} di Rust è possibile andare a creare le implementazioni specifiche in maniera molto semplice:
+\begin{verbatim}
+
+// Docker
+
+impl TryFrom<ContainerSummary> for NotebookDescription {
+
+    type Error = NotebookDescriptionConversionError;
+    
+    fn try_from(container: ContainerSummary) -> Result<Self, Self::Error> {
+
+        if let Some(id) = container.id.as_ref() {
+            if let Some(names) = container.names.as_ref() {
+                if let Some(notebook_name) = names.first() {
+                    let notebook_name = &notebook_name[1..].to_string();
+                    return Ok(NotebookDescription { 
+                        notebook_id: id.to_string(),
+                        notebook_name: notebook_name.clone(),
+                        notebook_endpoint: build_notebook_uri(...),
+                        notebook_status: container.status.clone()...,
+                    })
+                }
+                return Err(NotebookDescriptionConversionError::EmptyNameError)            
+            }
+            return Err(NotebookDescriptionConversionError::NoNamesError)
+        }
+        Err(NotebookDescriptionConversionError::NoIdError)
+
+    }
+    
+} 
+
+// Kubernetes
+
+impl TryInto<NotebookDescription> for Pod {
+    type Error = NotebookDescriptionConversionError;
+
+    fn try_into(self) -> Result<NotebookDescription, Self::Error> {
+
+        if let Some(id) = &self.meta().name {
+            if let Some(status) = &self.status {
+                return Ok(NotebookDescription {
+                    notebook_id: id.to_string(),
+                    notebook_name: id.to_string(),
+                    notebook_endpoint: build_notebook_uri(&id, None),
+                    notebook_status: status.phase.clone()
+                })
+            }
+            return Err(NotebookDescriptionConversionError::NoPodStatusError)
+        }
+        Err(NotebookDescriptionConversionError::NoIdError)
+        
+    }
+}
+\end{verbatim}
+I due \textit{trait} \verb|TryFrom| e \verb|TryInto| permettono di fare casting \textit{type-safe}, nel senso che vengono date solide garanzie sull'implementazione del tipo di casting, tra i tipi \verb|NotebookDescritpion|, \verb|Pod|, ovvero la risorsa che contiene le informazioni sui container per quanto riguarda Kubernetes e \verb|ContainerSummary|, ovvero la stessa cosa, però in ambito Docker.
+\newline
+A questo punto sarà possibile derivare i tipi in maniera molto semplice e \textit{type-safe}!
+\begin{verbatim}
+// esempio con Docker
+ async fn get_notebook_container(
+        &self, 
+        container_name: &str,
+    ) -> ... {
+        
+        let result = self.runtime
+            .list_containers(...).await?;
+        // result è di tipo ContainerSummary
+        
+        // altri controlli omessi per chiarezza
+    
+        let found_container: NotebookDescription = result
+            .first()
+            .unwrap()
+            .try_into()?;
+        // esplicitando il tipo di dato nella definizione della
+        // variabile, try_into() farà il casting
+        // type safe specificato prima.
+        // oltretutto, questo, a compile-time, ci darà
+        // garanzie sul fatto che NotebookDescription
+        // implementi correttamente il trait,
+        // altrimenti il programma non compilerebbe!
+        
+        Ok(Some(found_container))
+    }
+
+\end{verbatim}
+\subsection{Utilizzo di Bollard per l'interfaccia con Docker}
+NextPyter, per interfacciarsi con Docker, utilizza una libreria Rust chiamata \textit{Bollard}\footnote{https://github.com/fussybeaver/bollard}, a sua volta basata su \textit{Tokio}, rendendo anche questa libreria completamente \textit{asincrona} e \textit{non bloccante}.
+\newline
+A seguire, nella sezione apposita, verrà commentata anche la libreria che \textit{daemon} usa per interfacciarsi con Kubernetes. 
+\subsection{Struttura dell'API HTTP}
+Per quanto riguarda la struttura dell'API HTTP, \textit{daemon} è composto da \textbf{due} principali route "madre": \verb|containers| e \verb|cfg|.
+\begin{itemize}
+    \item \verb|containers| conterrà tutte le route che riguardano il ciclo di vita dei container dei notebook che verranno generati all'interno della piattaforma NextPyter, sia su Docker che su Kubernetes, anche se quest'ultima parte avrà una sezione dedicata, per via della sua estensione;
+    \item \verb|cfg|, invece, conterrà tutte le route che riguardano la configurazione dinamica delle immagini utilizzabili nel sistema e si interfaccerà con \textit{pagletto} per quanto riguarda l'offloading del download di queste ultime, per garantire la \textit{statelesness} del modulo \textit{daemon}. Questa serie di metodi, però, verrà descritta nella prossima sezione, per via della stretta relazione che ha con \textit{pagletto}.
+\end{itemize}
+\subsection{Analisi metodi containers}
+I metodi disponibili per gestire i container nel sistema sono i seguenti:
+\begin{verbatim}
+Router::new()
+    .route("/containers", get(root::index))
+    .route(
+        "/containers/stop/notebook/:container_name", 
+        post(root::stop_notebook)
+    )
+    .route(
+        "/containers/restart/notebook/:container_name", 
+        post(root::restart_notebook)
+    )
+    .route("/containers/notebook/:container_name", get(root::get_notebook))
+    .route(
+        "/containers/notebook/:container_name", 
+        delete(root::delete_notebook)
+    )
+    .route("/containers/notebook", post(root::spawn_notebook))
+    .route("/containers/notebooks", get(root::get_all_notebooks));
+\end{verbatim}
+\subsubsection{Ottenere la lista di notebook nel sistema}
+Mediante il metodo \verb|GET /containers/notebooks| è possibile ottenere una lista completa di tutti i notebook presenti nel sistema, attivi o meno.
+\begin{verbatim}
+pub async fn get_all_notebooks(
+   State(s): State<AppState>,
+) -> Result<Json<GetAllNotebooksResponse>, HttpError> {
+
+    let all_notebooks = s.orchestrator
+        .get_all_notebook_containers()
+        .await?;
+
+    Ok(Json(GetAllNotebooksResponse {
+        success: true,
+        count: all_notebooks.len(),
+        containers: all_notebooks,
+    }))
+
+}
+\end{verbatim}
+In questo caso, \textit{daemon} interrogherà l'orchestratore, astratto dal tipo \verb|Orchestrator|, ricevendo tutte le informazioni necessarie per soddisfare la richiesta del client.
+\subsubsection{Creazione di un notebook}
+Mediante il metodo \verb|POST /containers/notebook| sarà possibile eseguire tutti gli step necessari per avviare correttamente un notebook sull'orchestratore configurato.
+\begin{verbatim}
+    pub async fn spawn_notebook(
+    State(s): State<AppState>,
+    // Token(user): Token<Claim<UserClaims>>,
+    ValidatedJson(body): ValidatedJson<SpawnNotebookRequest>,
+) -> Result<Json<SpawnNotebookResponse>, HttpError> {
+
+    let SpawnNotebookRequest {
+        folder_path,
+        filename,
+        image_id,
+    } = body;
+
+    let container_name = build_notebook_name(&nanoid!(24, &NANOID_ALPHABET));
+    let notebook_token = nanoid!(32, &NANOID_ALPHABET);
+
+    let volume_name = s.orchestrator
+        .create_notebook_volume(&container_name, &folder_path).await?;
+
+    let container_image = ContainerImage::from_id(
+            & *s.rqlite, 
+            &image_id
+        ).await?;
+    if container_image.is_none() {
+        return Err(
+            HttpError::Simple(
+                StatusCode::NOT_FOUND, 
+                "container_image_not_found".to_string()
+            )
+        )
+    }
+    let container_image = container_image.unwrap();
+    
+    let image_name = format!(
+        "{}:{}", 
+        &container_image.name, 
+        &container_image.tag
+    );
+    
+    let container_endpoint = s.orchestrator
+        .start_notebook_container(
+            &container_name,
+            &image_name,
+            vec!("start-notebook.sh",
+                    ... // omesso per chiarezza
+                ),
+            &volume_name,
+            filename.as_deref(),
+        ).await?;
+
+    Ok(
+        Json(
+            SpawnNotebookResponse {
+                success: true,
+                container_name,
+                container_endpoint,
+                notebook_token,
+            }
+        )
+    )
+}
+
+\end{verbatim}
+Anche qui si può notare che la struttura dei metodi di accesso agli orchestratori e, in questo punto fondamentale, l'accesso agli \textit{engine di storage} di questi ultimi, sia completamente uniforme e \textit{platform-agnostic}. Fra qualche sezione verrà descritto in maggiore dettaglio l'accesso allo \textit{storage} da parte di \textit{daemon}.
+
+\subsubsection{Stop di un notebook}
+Mediante il metodo \verb|POST /containers/stop/notebook/:container_name| sarà possibile eseguire tutti gli step necessari per fermare (ma non cancellare) l'esecuzione di un notebook.
+\begin{verbatim}
+pub async fn stop_notebook(
+    State(s): State<AppState>,
+    Path(StopNotebookParams { container_name }): Path<StopNotebookParams>
+) -> Result<Json<GenericSuccessResponse>, HttpError> {
+
+    if let Some(_) = s.orchestrator
+        .get_notebook_container(&container_name)
+        .await? {
+            s.orchestrator.stop_notebook_container(&container_name).await?;
+            Ok(
+                Json(GenericSuccessResponse{
+                    success: true,
+                })
+            )
+    } else {
+        return Err(
+            HttpError::container_not_found_error()
+        )
+    }
+    
+}
+\end{verbatim}
+Notare come Rust sia estremamente moderno, con costrutti particolarmente intuitivi come \verb|if-let|, che pone particolare focus sulla \textit{null-safety} di questo linguaggio. 
+\newline
+In particolare, in Rust non esiste il valore \verb|null| per le variabili, rimpiazzato dal tipo \verb|Option<T>|. Sostanzialmente, quindi, le funzioni che possono non ritornare un valore (che in linguaggi come Java ritornerebbero \verb|null|, quindi), utilizzeranno questo tipo per esprimere la possibile mancanza di dati in ritorno; chi richiama la procedura, quindi, sarà forzato a controllare che sia stato ritornato qualcosa dalla funzione prima di procedere. 
+\newline
+Per capire meglio questa funzionalità è opportuno fare un esempio.
+\newline
+Le \textit{HashMap} in Rust sono implementate mediante il tipo \verb|Option<T>|:
+\begin{verbatim}
+use std::collections::HashMap;
+
+fn main() {
+    let mut map: HashMap<&str, u8> = HashMap::new();
+    map.insert("key-1", 1);
+    map.insert("key-2", 2);
+    map.insert("key-3", 3);
+
+    let maybe_value = map.get("key");
+    if let Some(value) = maybe_value {
+        println!("value: {:?}", value);
+    }else{
+        println!("no value found!");
+    }
+}
+\end{verbatim}
+In questo caso si è necessariamente forzati a controllare che all'interno di \verb|maybe_value| vi sia effettivamente un valore e non vi sia \verb|None| (l'alternativa a \verb|null|), in modo da prevenire che vengano utilizzati valori nulli, evitando completamente tutti i problemi relativi alle \textit{null-pointer exception}.
+\newline
+\verb|Option<T>|, infatti, è implementato nel seguente modo:
+\begin{verbatim}
+pub enum Option<T> {
+    Some(T),
+    None
+}
+\end{verbatim}
+In altre parole, una funzione che fa utilizzo di \verb|Option<T>| potrà ritornare il valore effettivo all'interno del tipo \textit{wrapper} \verb|Some|, altrimenti \verb|None|, forzando a tempo di compilazione il controllo sul valore effettivo.\newline
+Se Rust non avesse questo genere di costrutto, sarebbe possibile fare:
+\begin{verbatim}
+use std::collections::HashMap;
+
+fn main() {
+    let mut map: HashMap<&str, u8> = HashMap::new();
+    map.insert("key-1", 1);
+    map.insert("key-2", 2);
+    map.insert("key-3", 3);
+
+    let maybe_value = map.get("key");
+    println!("value: {:?}", maybe_value);
+}
+\end{verbatim}
+causando un errore runtime!
+\subsubsection{Riavviare un container}
+Mediante il metodo \verb|POST /containers/restart/notebook/:container_name| sarà possibile riavviare un notebook in esecuzione.
+\begin{verbatim}
+pub async fn restart_notebook(
+    State(s): State<AppState>,
+    Path(RestartNotebookParams{ container_name }): Path<RestartNotebookParams>
+) -> Result<Json<GenericSuccessResponse>, HttpError> {
+
+    if let Some(_) = s.orchestrator.get_notebook_container(&container_name).await? {
+        s.orchestrator.restart_notebook_container(&container_name).await?;
+
+        Ok(
+            Json(GenericSuccessResponse{
+                success: true,
+            })
+        )
+    } else {
+        return Err(
+            HttpError::container_not_found_error()
+        )
+    }
+
+}
+
+\end{verbatim}
+\subsubsection{Rimozione permanente di un notebook}
+Mediante il metodo \verb|DELETE /containers/notebook/:container_name| sarà possibile rimuovere permanentemente un notebook dal sistema.
+\begin{verbatim}
+pub async fn delete_notebook(
+    State(s): State<AppState>,
+    Path(DeleteNotebookParams{ container_name }): Path<DeleteNotebookParams>
+) -> Result<Json<GenericSuccessResponse>, HttpError>{
+
+    if let Some(notebook) = s.orchestrator
+        .get_notebook_container(&container_name)
+        .await? {
+
+            s.orchestrator
+                .stop_notebook_container(&notebook.notebook_name).await?;
+            s.orchestrator
+                .delete_notebook_container(&notebook.notebook_name).await?;
+            s.orchestrator
+                .delete_notebook_container_data(
+                &build_volume_name(&notebook.notebook_name)
+            ).await?;
+    
+        Ok(
+            Json(GenericSuccessResponse {
+                success: true,
+            })
+        )
+    } else {
+        return Err(
+            HttpError::container_not_found_error()
+        )
+    }
+}
+
+\end{verbatim}
+\newpage
+\subsection{Documentazione autogenerante con \textit{utoipa}}
+Per rendere il processo di documentazione quanto più integrato nel ciclo di sviluppo, si è utilizzato \verb|utoipa|, una libreria che auto-genera documentazione a partire da determinate \textit{macro}, ovvero particolari direttive al compilatore Rust, di \textit{code-generation}.
+\newline
+Decorare una \textit{route} con la documentazione è molto semplice, come si può vedere dal seguente esempio:
+\begin{verbatim}
+#[utoipa::path(
+    post,
+    path = "/containers/notebook",
+    responses(
+        (
+            status = 200, 
+            description = "Container spawned successfully", 
+            body = SpawnNotebookResponse,
+        ),
+        (
+            status = 404,
+            description = "Container not found",
+        )
+    ),
+    security(
+        ("bearerAuth" = [])
+    ),
+    request_body(
+        content_type = "application/json", content = SpawnNotebookRequest
+    )
+)]
+pub async fn spawn_notebook(
+    State(s): State<AppState>,
+    ValidatedJson(body): ValidatedJson<SpawnNotebookRequest>,
+) -> Result<Json<SpawnNotebookResponse>, HttpError> {
+    ...
+}
+\end{verbatim}
+Mediante la macro \verb|#[utoipa::path()]| è possibile istruire il compilatore alla generazione di uno schema \textit{OpenApi v3}. In questo caso verrà generato uno schema di una richiesta \verb|POST|, con URI \verb|/containers/notebook| e poi verrà elencata una lista di risposte possibili. Notare come è possibile passare un tipo personalizzato tra queste ultime, in questo caso \verb|SpawnNotebookResponse|:
+\begin{verbatim}
+use serde::Serialize;
+use utoipa::{ToResponse, ToSchema};
+
+#[derive(Serialize, ToResponse, ToSchema)]
+#[response(description="...")]
+pub struct SpawnNotebookResponse {
+    #[schema(example = true)]
+    pub success: bool,
+    #[schema(example = "notebook-hfxKMA4gvZ-74l7ZC3b3Wnym")]
+    pub container_name: String,
+    #[schema(example = "http://proxy-uri:8080/notebook/...")]
+    pub container_endpoint: String,
+    #[schema(example = "KwODErMig4oZFPAPuYbXG1ug26lSgp4-")]
+    pub notebook_token: String,
+}
+\end{verbatim}
+Derivando, tramite, anche qui, particolari \textit{macro} di \verb|utoipa|, i \textit{trait} \verb|ToResponse| e \verb|ToSchema|, è possibile andare ad arricchire il nostro tipo con metadati che verranno estrapolati a tempo di compilazione, ovvero quando queste \textit{macro} verranno eseguite. In particolare, tramite la macro \verb|#[schema()]| è possibile andare ad inserire commenti sui tipi di dato che compariranno nella documentazione. 
+\newline
+A questo punto sarà possibile esporre la documentazione autogenerata in maniera molto semplice, facendo uso di una \textit{route} apposita:
+\begin{verbatim}
+async fn build_json_schema() -> impl IntoResponse {
+
+    let str_docs = ApiDoc::openapi()
+        .to_pretty_json()
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "application/json".parse().unwrap());
+
+    (headers, str_docs)
+
+}
+
+// omesso per brevità
+
+let app = Router::new()
+        .route("/", get(routes::main::root::index))
+        .route("/json-schema", get(build_json_schema))
+        .with_state(state.clone())
+        .merge(container_routes(state.clone()))
+        .merge(cfg_routes(state.clone()));
+\end{verbatim}
+Dall'esempio di codice si può capire che la documentazione sarà esposta sull'endpoint \verb|/json-schema|.
+\newpage
+\section{Modulo \textit{pagletto}}
+Per supportare la possibilità di scaricare immagini Docker "on-demand", direttamente dalla piattaforma, è stato necessario introdurre un secondo modulo, \textit{pagletto}, per due principali motivi: il primo è sicuramente per mantenere quanto più modulare e \textit{non-monolitico} il progetto, riducendo la responsabilità che ciascun componente ha, mentre il secondo riguarda la natura stessa della funzionalità che si è voluto introdurre; scaricare immagini Docker è un processo potenzialmente molto lungo (alcune immagini possono avere dimensioni nell'ordine dei gigabyte), pertanto per non appesantire computazionalmente il modulo \textit{daemon} con task che, eventualmente, potrebbero andare a saturare la sua threadpool, è stato introdotto \textit{pagletto}.
+\newline
+Questo modulo è concettualmente molto semplice, tutto quello che fa è:
+\begin{itemize}
+    \item attendere che \textit{daemon} indichi la necessità di scaricare una nuova immagine Docker;
+    \item una volta ricevuto questo segnale, si andrà a scaricare tale immagine;
+    \item quando l'immagine è stata scaricata, si registrerà come "disponibile" una nuova immagine da utilizzare su NextPyter;
+    \item qualora vi siano degli errori durante il download, eventualmente riprovare il task in futuro.
+\end{itemize}
+Le tecnologie a supporto del modulo sono \textit{Valkey}, un database \textit{key-value} che verrà utilizzato come \textit{broker} di eventi, e \textit{RQLite}, il database \textit{highly available} che verrà utilizzato per memorizzare la configurazione di NextPyter, quindi le immagini disponibili.
+\subsection{Utilizzo di Valkey e Valkey Streams per collegare \textit{daemon} e \textit{pagletto}}
+Per creare la dinamica di "attesa-e-risposta" citata precedentemente, è stato necessario introdurre un componente che facesse da "ponte" tra i due moduli, Valkey,  un \textit{key-value} store ad altissime performance che da qualche anno supporta anche la possibilità di creare dei cosiddetti \textit{stream}: uno \textit{stream} è una struttura dati, assimilabile concettualmente ad una lista \textit{append-only}, dalla quale, all'inserimento di un dato al suo interno, verranno emessi eventi verso eventuali consumatori di tale struttura dati.\newline
+In particolare, Valkey supporta due principali modalità:
+\begin{itemize}
+    \item \textit{Fan-out}: uno stream può essere controllato da \textit{N} consumatori. All'inserimento di un \textit{record} all'interno dello stream, \textbf{tutti} i consumatori verranno notificati, processando il messaggio parallelamente;
+    \item \textit{Consumer groups}: questa modalità viene utilizzata quando ciascun consumatore dovrà essere il \textbf{solo} a ricevere un determinato messaggio. In altre parole, Valkey agirà in modo tale che tutti gli elementi che vengono inseriti all'interno dello stream verranno processati, a turno, da un singolo consumatore. Supponendo, ad esempio, di avere tre consumatori \textit{(C1, C2, C3)} e supponendo di ricevere messaggi numerati da 1 a 7, la sequenza di ricezione messaggi sarà:
+        \begin{verbatim}
+1 -> C1
+2 -> C2
+3 -> C3
+4 -> C1
+5 -> C2
+6 -> C3
+7 -> C1
+        \end{verbatim}
+    In questo caso, Valkey supporta un meccanismo di \textit{acknowledgement} per distinguere i messaggi processati correttamente da quelli malformati e/o con errori. Questa strategia permette di implementare policy di \textit{retry} da parte dei consumer dello stream qualora qualcosa vada storto durante il processing del messaggio.
+\end{itemize}
+
+\subsection{Funzionamento consumer groups}
+Per modellare i requisiti specificati, è stato creato uno stream chiamato \verb|stream:image_data|, configurato come consumer group, mediante il seguente comando:
+\begin{verbatim}
+    XGROUP CREATE stream:image_data builders $ MKSTREAM
+\end{verbatim}
+Tramite questo comando vengono creati al contempo lo stream, \verb|stream:image_data|, e il gruppo di consumatori che andrà ad accedere a tale stream, \verb|builders|; tutti i client che vorranno connettersi a tale stream dovranno specificare esplicitamente il gruppo di riferimento. Ovviamente è possibile associare più gruppi ad uno stream, creando parallelismo \textbf{tra} i gruppi, ma non competizione, poiché le logiche di \textit{acknowledgement} hanno luogo \textbf{all'interno} di un consumer group.
+\newline
+\subsubsection{Aggiunta dati ad uno stream}
+Aggiungere dati ad uno stream è particolarmente facile:
+\begin{verbatim}
+    XADD 
+        <nome stream> 
+        <id entry dello stream> 
+        <key1> <value1> 
+        <key2> <value2> 
+        <key3> ...
+\end{verbatim}
+Ad esempio, per aggiungere un oggetto all'interno dello stream creato in precedenza: 
+\begin{verbatim}
+    XADD 
+        stream:image_data 
+        * 
+        image_name nginx 
+        image_version mainline 
+        job_id aab3ef3fb33b2cecafabc3d3b3bab
+\end{verbatim}
+In questo caso verrà aggiunta una nuova \textit{entry} nello stream con id autogenerato (tramite il carattere \verb|*|). La entry sarà assimilabile ad una mappa con i seguenti valori:
+\begin{verbatim}
+    {
+        "image_name": "nginx",
+        "image_version": "mainline",
+        "job_id": "aab3ef3fb33b2cecafabc3d3b3bab"
+    }
+\end{verbatim}
+\subsubsection{Lettura dati da uno stream configurato come \textit{consumer group}}
+Anche leggere dati da uno stream configurato come \textit{consumer group} è immediato: 
+\begin{verbatim}
+    XREADGROUP 
+        GROUP
+        <group-name>  
+        BLOCK
+        <block-time>
+        <consumer-names> 
+        STREAMS 
+        <stream-name> 
+        <start-index>
+\end{verbatim}
+\begin{itemize}
+    \item il parametro \textbf{start-index} indica l'indice del messaggio da cui iniziare la lettura dello stream. Questo parametro supporta dei particolari valori:
+        \begin{itemize}
+            \item \verb|>|: questo valore indica la volontà da parte del consumer di voler leggere \textit{solo i nuovi messaggi}, quindi praticamente significa "ascoltare in tempo reale" ciò che accade sullo stream;
+            \item  \verb|"0-0"|: questo valore indica, invece, la volontà di leggere lo stream a partire dal \textit{primo elemento}. Questo è utile in fase di inizializzazione di \textit{pagletto}, poiché permette di processare tutti i messaggi di \textit{backlog}, ovvero quelli inseriti quando i consumer non erano disponibili (se un client mette un messaggio nello stream senza che nessun consumer sia attivo, questo rimarrà nella cosiddetta \textit{backlog} dello stream).
+        \end{itemize}
+    \item il parametro \textbf{block-time}, invece, indica quanti millisecondi il consumer deve aspettare prima di leggere lo stream: questo \textit{delay} viene applicato per non occupare inutilmente la coda di task asincroni di \textit{Tokio}.
+    \item è facile intuire cosa rappresentino gli altri parametri.
+\end{itemize}
+\subsubsection{\textit{Acknowledgement} e \textit{autoclaiming}}
+\textit{Acknowledgement} e \textit{autoclaiming} sono i due meccanismi che permettono ai consumer di implementare meccanismi di \textit{retry} qualora il processamento di un messaggio non vada a buon fine.
+\newline
+Il comando usato per fare \textit{acknowledgement} di un messaggio è molto semplice:
+\begin{verbatim}
+    XACK
+        <stream-name>
+        <group-name>
+        <message-id>
+\end{verbatim}
+Fare \textit{acknowledgement} di un messaggio significa rimuoverlo dalla coda dei messaggi \textit{pending} (quindi dallo stream), ovvero quelli ancora in fase di processamento o ancora da processare. In questo modo, una volta che si fa \textit{ack} di un messaggio, questo verrà rimosso dalla lista di messaggi che vengono letti tramite il comando \verb|XREAD|.
+\newline
+Tramite il comando \verb|XAUTOCLAIM|, invece, è possibile \textbf{recuperare messaggi}. È possibile, infatti, che alcuni \textit{consumer} all'interno di un gruppo non riescano a processare un messaggio: quando questo è il caso, sarà necessario che quel messaggio venga recuperato in un qualche modo e venga ri-processato da un altro consumer.
+\begin{verbatim}
+    XAUTOCLAIM 
+        <stream-name> 
+        <group-name>
+        <consumer>
+        <min-idle-time> 
+        <start>
+\end{verbatim}
+Il parametro \textbf{min-idle-time} indica sostanzialmente il numero di millisecondi che devono essere passati dall'ultimo \verb|CLAIM| di un messaggio. Il \verb|CLAIM| di un messaggio avviene quando viene \textit{letto} tramite \verb|XREAD|, ma può anche avvenire manualmente mediante l'utilizzo del comando \verb|XCLAIM|. Pertanto, se questo comando viene chiamato in questo modo:
+    \begin{verbatim}
+    XAUTOCLAIM
+        streams:image_data
+        builders
+        builder-1
+        60000
+        "0-0"
+    \end{verbatim}
+ciò significherà che il consumer \verb|builder-1| partirà dall'inizio dello stream (\verb|"0-0"|) e controllerà che vi siano messaggi con età maggiore di un minuto. Il consumer in questione si impossesserà dei messaggi e farà un \verb|CLAIM| implicito di questi ultimi. A questo punto, i messaggi appena ottenuti saranno disponibili nella prossima chiamata ad \verb|XREAD|.
+\newline
+In altre parole, se un messaggio non viene \textit{acknowledged} e non viene effettuato il \textit{re-claim} dal consumer che l'ha inizialmente letto entro un intervallo minore di quello specificato in \verb|XAUTOCLAIM|, allora questo messaggio verrà "rimosso" dalla coda del consumer iniziale e verrà assegnato a quello che fa quest'ultimo comando, permettendo il \textit{ri-processamento} di messaggi che hanno avuto problemi.
+\subsection{Comunicazione tra \textit{daemon} e \textit{pagletto}}
+Assodato il concetto di \textit{stream}, è ora venuto il momento di dettagliare come i due moduli si connettono.
+\subsubsection{Route \textit{cfg}}
+Come anticipato, le route che dipendono dalla route "madre" \verb|cfg| sono quelle che regolano la configurazione del sistema.
+\begin{verbatim}
+    Router::new()
+        .route("/cfg/request-image-pull", post(root::request_image_pull))
+        .route("/cfg/image-logs/:image_id", get(root::get_image_logs))
+        .route("/cfg/images", get(root::get_images))
+        .with_state(state)
+\end{verbatim}
+
+\subsubsection{Richiedere il download di un'immagine}
+Tramite la route \verb|POST /cfg/request-image-pull| è possibile iniziare il download di un'immagine Docker.
+\begin{verbatim}
+pub async fn request_image_pull(
+    State(s): State<AppState>,
+    ValidatedJson(body): ValidatedJson<PullImageRequest>
+) -> Result<Json<PullImageResponse>, HttpError> {
+
+    let PullImageRequest {
+        image_name,
+        image_tag
+    } = body;
+
+    let image_id = nanoid!(32);
+    let mut conn = s
+        .redis.unwrap()
+        .get_multiplexed_async_connection()
+        .await?;
+        
+    redis::cmd("xadd")
+        .arg(s.images_stream_name.unwrap())
+        .arg("*")
+        .arg("image_name")
+        .arg(&image_name)
+        .arg("image_tag")
+        .arg(&image_tag)
+        .arg("job_id")
+        .arg(&image_id)
+        .query_async(&mut conn)
+        .await?;
+
+
+    Ok(Json(
+        PullImageResponse {
+            success: true,
+            image_id
+        }
+    ))
+
+}
+
+\end{verbatim}
+Come si può evincere da questo spezzone di codice, la route non farà altro che piazzare un messaggio all'interno di uno \textit{stream} Valkey, in maniera del tutto analoga a quella vista nella sezione precedente. A valle, vi sarà \textit{pagletto} che riceverà questo aggiornamento e processerà questo evento. Avremo modo di approfondire \textit{come} avviene il download da parte di \textit{pagletto} tra un paio di paragrafi.
+
+\subsubsection{Stato di un'immagine}
+Tramite la route \verb|GET /cfg/image-logs/:image_id| è possibile monitorare lo stato di avanzamento del processo di download dell'immagine.
+\begin{verbatim}
+pub async fn get_image_logs(
+    State(s): State<AppState>,
+    Path(GetImageLogsParams { image_id }): Path<GetImageLogsParams>
+) -> Result<Json<GetImageLogsResponse>, HttpError> {
+
+    let result = ContainerImage::get_logs(
+        & *s.rqlite,
+        &image_id
+    ).await?;
+
+    Ok(Json(
+        GetImageLogsResponse {
+            success: true,
+            result,
+        }
+    ))
+
+}
+
+\end{verbatim}
+Anche qui si fa uso di \textit{RQLite} per persistere questi log in maniera ridondata. Tramite questo endpoint si potrà verificare se vi sono stati errori durante il download o se tutto è andato liscio.
+
+\subsection{Schema di funzionamento di \textit{pagletto}}
+Nel seguente diagramma è riassunto lo schema di funzionamento di \textit{pagletto}. È stato scelto questo metodo per rappresentarne il funzionamento, perché questo modulo è particolarmente di basso livello e andrebbero introdotti concetti che vanno al di fuori dello scopo di questa tesi.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1\textwidth]{files/images/pagletto-diagram.jpg}
+    \caption{Schema di funzionamento di \textit{pagletto}}
+    \label{fig:pagletto-diagram}
+\end{figure}
+\begin{itemize}
+    \item nel punto \verb|a|, notiamo che l'indice di lettura viene posto a "0-0" e non a ">". Questo perché è possibile che durante l'operazione di lettura della \textit{backlog} siano arrivati dei messaggi che non possono essere saltati, ma che vanno processati.
+    \item punto \verb|b|: questo viene effettuato perché viene data precedenza ai messaggi in arrivo in tempo reale. Quando non vi sono messaggi in arrivo, allora si processano quelli nella cosiddetta \textit{dead-letter queue};
+    \item punto \verb|c|: qualora non vi sia alcun messaggio, né nella \textit{dead-letter queue} né dalla lettura dell'indice "0-0", allora ci si mette in ascolto di nuovi messaggi.
+\end{itemize}
+
+Nonostante il componente \textit{pagletto} sia stato realizzato per fare \textit{offloading} del download delle immagini, è stata comunque prestata attenzione alla metodologia di gestione di questo task: se si nota, infatti, il download avviene in maniera particolarmente efficiente in un contesto asincrono, dato che i chunk del download vengono processati indipendentemente e collezionati alla fine del download, permettendo di gestire tanti task alla volta.
+\newline
+Per più dettagli sul funzionamento di questo modulo, è opportuno consultare la repo di riferimento\footnote{https://gitlab.com/nextpyter/pagletto}.
+\newpage
+\section{Modulo \textit{proxy}}
+Il modulo \textit{proxy} è particolarmente importante per quanto riguarda l'implementazione di logiche di \textit{routing} personalizzate del traffico che proviene dall'esterno verso il \textit{core} di NextPyter. 
+\newline
+La tecnologia abilitante alla base di questo modulo è \textit{NGINX}, come già anticipato, con supporto a \textit{NJS}.
+\subsection{Configurazione di NGINX come reverse proxy per notebook Jupyter}
+Il principale risultato che si vuole ottenere tramite questa configurazione è quello già mostrato in figura \ref{fig:routing}, che risolve principalmente la questione riguardante il \textit{binding} della porta locale: si vuole evitare di dover associare ciascun notebook ad una porta locale dell'host, in modo da far passare il traffico per quella porta. Questo setup, oltre che ad essere controproducente per i motivi elencati nella sezione \ref{net-acceptable}, non è facilmente realizzabile in un sistema basato su Kubernetes, poiché il \textit{network model}\footnote{https://kubernetes.io/docs/concepts/services-networking/} che quest'ultimo implementa si basa su astrazioni più complesse di quelle di Docker.
+\newline
+\subsubsection{Come configurare NGINX}
+Prima di spiegare la configurazione effettiva di NGINX per NextPyter è opportuno introdurre alcuni concetti riguardanti quest'ultima.
+\newline
+A tale pro, ecco un semplicissimo \textit{setup}:
+\begin{verbatim}
+server {
+    listen 14000;
+    resolver 127.0.0.11 ipv6 off;
+}
+\end{verbatim}
+I file di configurazione per NGINX funzionano a "blocchi", ovvero sezioni di testo racchiuse fra parentesi graffe:
+\begin{itemize}
+    \item il blocco \verb|server| specifica che si sta scrivendo una configurazione per un determinato dominio o host. Questo concetto è chiamato \textit{virtualhosting}, che sostanzialmente è riassumibile come la capacità di un web server di gestire tanti domini per volta. NGINX implementa questa funzionalità separando ogni configurazione di dominio all'interno di file differenti (o, volendo, all'interno di blocchi \verb|server| all'interno dello stesso file). Generalmente, una configurazione si riferisce ad un determinato dominio tramite la direttiva \verb|server_name|, quindi se ad esempio si vuole scrivere la configurazione per il dominio \verb|macca.cloud|, andrà specificato \verb|server_name macca.cloud|. Se si omette tale direttiva, come nella configurazione d'esempio, il blocco \verb|server| di riferimento agirà come \textit{"catch-all" route}, ovvero la \textit{route} alla quale tutte le richieste che fanno riferimento a domini non gestiti da NGINX verrano redirette.\newline
+    Poiché non vi sono domini, dato che questo è un proxy interno al \textit{core} di NextPyter, è possibile omettere la direttiva \verb|server_name|, anche perché questo sarà l'unico file di configurazione che verrà scritto;
+    \item Con la direttiva \verb|listen|, invece, si associa NGINX ad una porta locale. In questo caso, NGINX sarà dentro un container, pertanto bisognerà esporre tale porta, locale al container, in un qualche modo, che dipenderà dall'orchestratore che sta sotto il sistema;
+    \item La direttiva \verb|resolver| è di fondamentale importanza in ambienti containerizzati, sia su Kubernetes che su Docker, poiché tramite questa sarà possibile utilizzare i \textbf{nomi dei container} al posto dei loro IP anche nelle configurazioni di NGINX. Questo è particolarmente utile poiché gli indirizzi di rete dei container, sia in Docker che in Kubernetes, sono \textit{ephemeral}, nel senso che non sono allocati con una particolare persistenza, pertanto non si può fare alcuna assunzione sul loro valore tra un riavvio di container e l'altro.
+\end{itemize}
+Una configurazione più avanzata può introdurre il concetto di \textit|location|, che si definirà con un blocco che avrà lo stesso nome. Le \textit{location} sono sostanzialmente il concetto di \textit{route} che è già stato descritto quando si è parlato di \textit{Axum}, ma "tradotte" nel linguaggio di configurazione NGINX.
+\begin{verbatim}
+server{
+    listen 14000;
+    # resolver, ...
+
+    location /something/ {
+
+        proxy_pass http://service-inside-docker:8080/;
+    }
+
+    # ... more stuff
+}
+\end{verbatim}
+\begin{itemize}
+    \item Usando il blocco \verb|location|, quindi, si avrà la possibilità di creare una nuova \textit{route} verso la quale si potranno fare richieste HTTP. In questo esempio è stata creata la route \verb|/something/|, che sostanzialmente si occuperà di gestire tutte le richieste di tipo \verb|http://localhost:14000/something/*|. Notare come il \textit{trailing slash} sia di fondamentale importanza, perché abilita proprio questo comportamento;
+    \item All'interno del blocco \verb|location| viene descritto ciò che accade quando una richiesta che viene "catturata" dalla location:
+        \begin{itemize}
+            \item \verb|proxy_pass| imposta l'indirizzo verso il quale si vogliono re-indirizzare le richieste. In questo caso, il \textit{trailing slash}, oltre ad attivare il meccanismo succitato, farà in modo che NGINX passi verso l'indirizzo specificato \textit{tutto l'URI}. Ad esempio, se la richiesta fosse \newline\verb|http://localhost:14000/something/a/b/c|, allora NGINX indirizzerebbe tale richiesta a \verb|http://service-inside-docker:8080/a/b/c| (notare come viene \textbf{omesso} il path della \verb|location|!). 
+        \end{itemize}
+\end{itemize}
+Sono state descritte le direttive che verranno utilizzate all'interno di NextPyter, ma, ovviamente, NGINX può fare molto più di quello che è scritto in questa breve introduzione.
+\newline
+Un'ultieriore osservazione può essere fatta sull'indirizzo che è specificato nella direttiva \verb|proxy_pass|: quell'indirizzo è un \textit{nome DNS}, non un indirizzo IP, pertanto è necessario configurare NGINX, come si è visto in precedenza, in modo tale che supporti un \textit{resolver} che contenga tale nome. Di uguale importanza è il fatto che tutti i servizi che vengono raggiunti in questo modo \textbf{dovranno essere già online} quando NGINX caricherà questa configurazione, perché dovranno essere risolti in modo da associarvi un IP.
+\subsubsection{Reverse proxy per i notebook}
+La configurazione precedente si basa su un \textit{matching statico}, nel senso che sia la \verb|location| che la direttiva \verb|proxy_pass| agiscono su stringhe \textit{statiche}: tutte le richieste che soddisfano il path \verb|/something/*| verranno \textit{sempre} reindirizzate a \newline\verb|http://service-inside-docker:8080/*|.\newline
+Poiché i nomi dei notebook, quando eseguiti da \textit{daemon}, sono generati randomicamente e in una maniera non deterministica, è necessario introdurre il concetto di \textit{pattern matching} all'interno dei blocchi \verb|location|.\newline
+Ipotizzando che gli URL dei notebook avranno forma del tipo
+\begin{verbatim}
+    /notebook/nome-notebook/path-qualsiasi?parametro=a&altro-parametro=b
+\end{verbatim}
+e sapendo che il nome del notebook equivale al suo \textbf{nome DNS} all'interno dell'orchestratore, il problema può essere risolto in questo modo:
+
+\begin{verbatim}
+location ~ ^/notebook/([^/]+)/(.*)$ { 
+                
+    proxy_pass http://$1:15750;
+
+    # altri header di configurazione, non verranno commentati perché
+    # fuori dallo scopo di questa sezione, anche perché sono
+    # abbastanza standard
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_http_version 1.1;
+    proxy_redirect off;
+    proxy_buffering off;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection "upgrade";
+    proxy_read_timeout 86400;
+
+}
+\end{verbatim}
+In particolare, è importante notare che la \verb|location| è sostanzialmente definita tramite una \textit{regex}: tutti gli URL che hanno la forma succitata subiranno il seguente trattamento:
+\begin{itemize}
+    \item tramite il primo \textit{capture group}, ovvero \verb|([^/]+)|, verrà estratta la prima parte dell'URL, ovvero il \textbf{nome del container}. Questo risultato sarà inserito nella variabile \verb|$1| interna alla \verb|location| (comportamento standard di NGINX);
+    \item il secondo \textit{capture group} (\verb|(.*)|), invece, serve a specificare che dopo lo \textit{slash} successivo al primo capture group vi potrà essere qualsiasi cosa. Questo è necessario, e non basta solo il \textit{trailing slash} come visto prima, perché la location è definita come \textit{regex} mediante il carattere \verb|~| posto prima del suo nome;
+    \item la richiesta verrà dunque reindirizzata \textbf{per intero} (quindi completa anche del secondo capture group), tramite la direttiva \verb|proxy_pass|, al nome DNS contenuto nella variabile \verb|$1|, ovvero il \textbf{nome del notebook}.
+\end{itemize}
+Notare come la porta del notebook al quale si reindirizzano le richieste (15750) è statica, questo perché container diversi potranno essere eseguiti sulla stessa porta senza problemi con questo approccio, poiché non dovranno essere esposti \textit{direttamente} sull'host locale.
+
+\subsection{Autenticazione delle richieste tramite NGINX (NJS) e Keycloak}
+Ora che NGINX è in grado di effettuare \textit{routing} verso i notebook, è tempo di inserire le logiche di autorizzazione e autenticazione richieste. È possibile implementare questo comportamento all'interno dei blocchi \verb|location|, in modo da controllare tutte le richieste fatte per determinati \textit{path}.
+\newline
+Per prima cosa è necessario definire una variabile che contenga il \textit{token} che viene passato nell'header \textit{Authorization}, nel seguente modo:
+\begin{verbatim}
+
+map $http_authorization $header_token {
+    "~*^Bearer (.*)$" $1;
+    default $http_authorization;
+}
+
+\end{verbatim}
+Tramite la direttiva \verb|map|, infatti, è possibile \textit{mappare}, appunto, il risultato dell'applicazione di una \textit{regex} di una variabile già definita (in questo caso \verb|$http_authorization|, già presente in NGINX) su un'altra che si va a definire (\verb|$header_token|).
+\newline
+Tramite il meccanismo di estrapolazione risultati visto in precedenza (notare \verb|$1|) si va ad estrarre il token e a piazzarlo dentro la variabile succitata, che sarà disponibile a tutte le \verb|location| che vorranno farne uso.
+\subsubsection{\textit{Introspection endpoint}}
+Il Token Introspection Endpoint nell'ambito di OAuth 2.0 è un punto di accesso che consente di verificare la validità di un token (sia \textit{access} che \textit{refresh}) che è stato rilasciato da un IDP. Questo endpoint serve a fornire informazioni sui token in modo centralizzato, utile per validare il loro stato in tempo reale, senza dover gestire direttamente i dettagli interni del token (come nel caso dei token JWT, che possono essere validati autonomamente).
+\newline
+Per verificare che un token sia ancora valido, se sia stato revocato o quali permessi garantisca, si deve inviare una richiesta HTTP POST al Token Introspection Endpoint con il token da verificare, che, su Keycloak, ha questo aspetto:
+\begin{verbatim}
+    https://<keycloak>/realms/<realm>
+        /protocol/openid-connect/token/introspect
+\end{verbatim}
+Per verificare un token, però, è necessario inviare le credenziali (\textit{client\_id} e \textit{secret}) di un client \textit{OAuth2} registrato sull'IDP.
+\newline
+Il corpo della richiesta ha questa forma:
+\begin{verbatim}
+    {
+        "token": "jwt_da_verificare",
+        "token_type_hint": "access_token" // o "refresh_token"
+    }
+\end{verbatim}
+Ovviamente, il campo \verb|token_type_hint| viene usato per specificare al server che tipo di token si vuole ispezionare.
+\newline
+La risposta può essere simile a questa:
+\begin{verbatim}
+{
+  "active": true,
+  "client_id": "my-client",
+  "username": "user1",
+  "scope": "openid profile",
+  "exp": 1615395794,
+  "iat": 1615392194,
+  "sub": "12345678-1234-1234-1234-1234567890ab",
+  "aud": ["my-resource-server"],
+  "iss": "https://<keycloak-server>/realms/<realm>"
+}
+\end{verbatim}
+Questo approccio viene utilizzato generalmente quando il server \textit{OAuth2} emette token cosiddetti \textit{opachi}, ovvero non \textit{JWT}, quindi token che non contengono \textit{direttamente} delle informazioni, dato che è l'unico modo che si ha per verificare la veridicità di un token di questo tipo.
+\newline
+Anche se NextPyter utilizza JWT, è stato scelto di utilizzare questo genere di verifica per motivi prettamente riguardanti alle tempistiche di sviluppo. Infatti, poiché vengono utilizzati JWT, sarebbe possibile tranquillamente fare la verifica del token direttamente su NGINX, riducendo il traffico sull'IDP.
+\subsubsection{Implementazione della richiesta di \textit{introspection}}
+Per realizzare la logica appena descritta, è stato fatto uso del modulo \textit{NJS} di NGINX accoppiato alla direttiva \verb|auth_request|.
+\newline
+Innanzitutto, occorre configurare NGINX nel seguente modo:
+\begin{verbatim}
+js_import authService from js/auth_service.js; # modulo js importato
+server {
+    # ...
+    location = .introspect  {
+        internal;
+        js_content authService.introspectAccessToken;
+    }
+}
+\end{verbatim}
+Viene aggiunta una \verb|location| \textit{internal} che verrà richiamata all'interno delle altre \verb|location| che necessiteranno la verifica del token.
+\newline
+Questa \verb|location|, tramite la direttiva \verb|js_content|, eseguira codice JavaScript personalizzato.
+\newline
+Per aggiungere una \verb|auth_request| ad una \verb|location|, basta semplicemente inserire le seguenti direttive in una location:
+\begin{verbatim}
+    location ~ ^/notebook/([^/]+)/(.*)$ { 
+        auth_request .introspect;
+        error_page 401 = .unauthorized;
+        # altro ...
+    }
+\end{verbatim}
+\begin{itemize}
+    \item \verb|auth_request| specifica che la \textit{location} che si vuole chiamare per effettuare la verifica dell'autenticità della richiesta. In questo caso specifichiamo il nome del blocco \textit{internal} creato precedentemente, in modo tale che la richiesta "passi" per tale \textit{location};
+    \item le \verb|auth_request|, come specificato nella documentazione\footnote{http://nginx.org/en/docs/http/ngx\_http\_auth\_request\_module.html}, potranno esclusivamente ritornare i codici di errore \verb|401, 403| e \verb|204|. Per questo motivo, è opportuno catturare il verificarsi di tale errore mediante l'utilizzo della direttiva \verb|error_page|, che accetterà anch'essa il nome di una \textit{location} verso la quale indirizzare le richiesta qualora si verificasse uno degli errori specificati sopra.
+\end{itemize}
+L'esecuzione della chiamata all'\textit{introspection endpoint} viene modellata tramite una ultieriore \textit{location}:
+\begin{verbatim}
+    location = .perform_introspection {
+       
+        internal;
+        gunzip on;
+
+        proxy_method      POST;
+        proxy_set_header  Authorization $arg_auth;
+        proxy_set_header  Content-Type "application/x-www-form-urlencoded";
+        proxy_set_body    "token=$arg_token&token_hint=$oauth_token_hint";
+        proxy_pass        $oauth_token_introspect_endpoint;
+
+    }
+
+\end{verbatim}
+Prima di commentare questo blocco, viene introdotto il contenuto del modulo JavaScript citato in precedenza, che si occuperà di eseguire le verifiche sul token:
+\begin{verbatim}
+const required_roles = [
+    " nextpyter-cfg-routes",
+    "nextpyter-notebooks-routes",
+];
+
+const introspectAccessToken = async (res) => {
+
+    const access_token = res.variables.header_token;
+    const auth_creds = 
+        `${res.variables.oauth_client_id}:${res.variables.oauth_client_secret}`
+    let basic_auth_header = `Basic ${btoa(auth_creds)}`;
+
+    if(access_token.trim().length === 0){
+        res.variables.no_auth_reason = 'empty_token';
+        res.return(401);
+        return;
+    }
+
+    const introspection_response = await res.subrequest(
+        `.perform_introspection`,
+        `token=${access_token}&auth=${basic_auth_header}`,
+    );
+
+    if (introspection_response.status != 200) {
+        res.variables.no_auth_reason = `bad_introspection`;
+        res.return(401);
+        return;
+    }
+    processToken(res, introspection_response);
+
+}
+
+const processToken = (res, introspection_reply) => {
+    try {
+        const parsed_json = JSON.parse(introspection_reply.responseText);
+        const stuff = evaluateToken(parsed_json, required_roles);
+        res.error(introspection_reply.responseText);
+
+        if (!stuff.active) {
+            res.variables.no_auth_reason = 'not_active';
+            res.return(401);
+            return;
+        }
+        if (!stuff.authorized) {
+            res.variables.no_auth_reason = 'no_roles';
+            res.return(401);
+            return;
+        }
+
+        res.status = 204;
+        res.sendHeader();
+        res.finish();
+
+    } catch (err) {
+        res.error(err);
+        res.variables.no_auth_reason = 'cannot_parse';
+        res.return(401);
+    }
+}
+
+const evaluateToken = (json, roles) => {
+
+    if (json.active == true) {
+
+        const authorized = json.realm_access.roles
+            .filter(role => roles.includes(role)).length === roles.length;
+
+        return {
+            active: true,
+            authorized,
+        }
+    } else {
+        return {
+            active: false,
+            authorized: false,
+        }
+    }
+
+}
+
+export default {
+    introspectAccessToken
+}
+
+\end{verbatim}
+Vengono inoltre aggiunte le seguenti variabili nel blocco \verb|server|:
+\begin{verbatim}
+    server {
+        # altro...
+        set $oauth_token_introspect_endpoint 
+            "http://keycloak/realms/master/protocol/openid-connect/token/introspect";
+        set $oauth_refresh_token_endpoint 
+            "http://keycloak/realms/master/protocol/openid-connect/token";
+        set $oauth_token_hint "access_token"; 
+        set $oauth_client_id "client_id";
+        set $oauth_client_secret "secret";
+        js_var $no_auth_reason "";
+
+    # resto della configurazione ...
+    
+    }
+\end{verbatim}
+A questo punto è possibile descrivere il flusso di operazioni che una richiesta subisce prima di essere indirizzata verso un notebook:
+\begin{itemize}
+    \item viene chiamata la \verb|location| con nome \verb|.introspect|;
+    \item in tale location viene eseguito il codice JavaScript del modulo succitato;
+    \item la variabile \verb|res| all'interno del modulo si riferirà al contesto contenente tutti i dati a cui il modulo ha accesso. In particolare, nella proprietà \verb|variables| di tale oggetto, vi saranno tutte le variabili definite nel file di configurazione di NGINX, come ad esempio la variabile \verb|$header_token| definita in precedenza;
+    \item il modulo JavaScript effettua una chiamata alla \verb|location| di introspection, passando determinate variabili (\verb|token=${access_token}&auth=${basic_auth_header}|);
+    \item le variabili appena passate saranno accessibili all'interno della \verb|location| di \textit{introspection} prefissandole con \verb|$arg_| (infatti si usa, ad esempio, \verb|$arg_auth| nel codice);
+    \item se la richiesta ha successo, allora il controllo torna al modulo JavaScript, che controllerà che il token contenga gli opportuni campi per poter accedere alla risorsa protetta;
+    \item poiché i codici di errore sono limitati, la gestione degli errori è fatta mediante la variabile \verb|no_auth_reason|, che verrà controllata, qualora si verificherà un problema, nella \verb|location| di nome \verb|.unauthorized|, riportata sotto a questo elenco. 
+\end{itemize}
+\begin{verbatim}
+    location .unauthorized {
+        internal;
+        default_type application/json;
+        add_header Content-Type "application/json";
+    
+        if ($no_auth_reason = 'empty_token') {
+            return 400 '{
+                "success": false,
+                "error": "token is empty"
+            }';
+        }
+        if ($no_auth_reason = 'bad_introspection') {
+            return 500 '{
+                "success": false,
+                "error": "introspection failed"
+            }';
+        }
+        if ($no_auth_reason = 'not_active') {
+            return 403 '{
+                "success": false,
+                "error": "token is not active"
+            }';
+        }
+        if ($no_auth_reason = 'no_roles') {
+            return 401 '{
+                "success": false,
+                "error": "you are not authorized to access this resource"
+            }';
+        }
+        if ($no_auth_reason = 'cannot_parse') {
+            return 500 '{
+                "success": false,
+                "error": "parsing error"
+            }';
+        }
+        return 500 '{
+            "success": false,
+            "error": "something unknown happened :O"
+        }';
+    }
+\end{verbatim}
+In questa maniera è stato possibile implementare il controllo dell'autorizzazione delle richieste in maniera centralizzata e \textit{globale} a tutto il \textit{core} di NextPyter, semplicemente usando NGINX come \textit{application gateway}. Eventualmente, aggiungere questi controlli a nuovi servizi, mappati a determinate \textit{location}, che necessitano di autorizzazione sarà estremamente facile, poiché basterà aggiungere queste due righe in cima al blocco:
+\begin{verbatim}
+location /nuovo-servizio/ {
+    auth_request .introspect;
+    error_page 401 = .unauthorized;
+
+    proxy_pass ...;
+}
+\end{verbatim}
+\newpage
+\section{Modulo \textit{docs}}
+Il modulo \textit{docs} permette di consultare la documentazione riguardante l'API REST offerta dal modulo \textit{daemon} in maniera molto semplice. Come abbiamo già visto, tutti gli endpoint di \textit{daemon} generano, a tempo di compilazione, uno stralcio di documentazione in formato OpenAPI v3, che verrà esposto ad un particolare endpoint nella seguente maniera:
+\begin{verbatim}
+#[derive(OpenApi)]
+#[openapi(
+    info(description = "Nextpyter Daemon HTTP endpoints."),
+    paths(
+        routes::containers::root::spawn_notebook,
+        routes::containers::root::restart_notebook,
+        routes::containers::root::get_notebook,
+        routes::containers::root::delete_notebook,
+        routes::containers::root::get_all_notebooks,
+        routes::cfg::root::request_image_pull,
+        routes::cfg::root::get_image_logs,
+        routes::cfg::root::get_images,
+    ), 
+    modifiers(&SecurityAddon),
+    components(
+        schemas(
+            SpawnNotebookRequest,
+            SpawnNotebookResponse, 
+            UserClaims,
+            StopNotebookParams,
+            GenericSuccessResponse,
+            RestartNotebookParams,
+            GetNotebookParams,
+            GetNotebookResponse,
+            DeleteNotebookParams,
+            NotebookDescription,
+            GetAllNotebooksResponse,
+            PullImageRequest,
+            PullImageResponse,
+            GetImageLogsParams,
+            GetImageLogsResponse,
+            GetImagesResponse,
+            Pagination,
+            ContainerImage,
+        )
+    )
+)]
+struct ApiDoc;
+\end{verbatim}
+Si crea, quindi, un tipo, \verb|ApiDoc|, che verrà \textit{decorato} a \textit{compile-time} con tutti gli schemi che sono stati definiti precedentemente tramite \textit{utoipa}. A questo punto, vengono esposti gli schemi tramite un normale handler \textit{Axum}:
+\begin{verbatim}
+
+let app = Router::new()
+        .route("/", get(routes::main::root::index))
+        .route("/json-schema", get(build_json_schema))
+        .with_state(state.clone())
+        .merge(container_routes(state.clone()))
+        .merge(cfg_routes(state.clone()));
+
+    app
+
+
+async fn build_json_schema() -> impl IntoResponse {
+
+    let str_docs = ApiDoc::openapi()
+        .to_pretty_json()
+        .unwrap();
+    let mut headers = HeaderMap::new();
+    headers.insert("Content-Type", "application/json".parse().unwrap());
+
+    (headers, str_docs)
+
+}
+
+\end{verbatim}
+
+In questo modo, l'endpoint `\verb|json-schema|` di \textit{daemon} emetterà il \textit{JSON} che rappresenterà la descrizione degli endpoint dell'API:
+\begin{verbatim}
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "nextpyter-daemon",
+    "description": "Nextpyter Daemon HTTP endpoints.",
+    "license": {
+      "name": ""
+    },
+    "version": "1.0.0"
+  },
+  "paths": {
+    "/cfg/image-logs/{id}": {
+      "get": {
+        "tags": [
+          "routes::cfg::root"
+        ],
+        "summary": "This route gets information about a container image...",
+        "operationId": "get_image_logs",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PullImageRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Logs obtained successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/GetImageLogsResponse"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {
+            "bearerAuth": []
+          }
+        ]
+      }
+    },
+    ...
+}
+\end{verbatim}
+Per mostrare questi dati in maniera più \textit{user-friendly} si è utilizzato \textit{Swagger UI}, sostanzialmente un client web che interpreta l'oggetto JSON appena visto e lo mostra in un'interfaccia web:
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1\textwidth]{files/images/swagger-ui-1.png}
+    \caption{Schermata di \textit{Swagger UI} per il modulo \textit{daemon}}
+    \label{fig:swagger-ui-daemon}
+\end{figure}
+\newline
+Notare come in figura \ref{fig:swagger-ui-daemon} si possano vedere tutti i metadati che sono stati inseriti usando \textit{utoipa}. 
+\newpage
+\section{Modellazione del sistema tramite Docker Compose}
+Come primo, semplice, modello, usabile anche per \textit{demo} e per capire come i componenti comunicano tra loro, è possibile fare riferimento alla seguente repo\footnote{https://gitlab.com/nextpyter/core}.
+\newline
+Tramite questa repository è possibile capire il reale funzionamento del \textit{core} di NextPyter su scala ridotta, anche se, in pratica, questa configurazione è già modificabile per essere production-ready, a supporto di deployment più piccoli.
+\newline
+Il sistema viene modellato tramite Docker Compose nel seguente modo:
+\begin{verbatim}
+networks:
+  daemon-net:
+    name: daemon-net
+
+volumes:
+  rqlite_data:
+  nc_db:
+  nc_cfg: 
+  nextpyter_binds:
+    external:
+      true
+
+services:
+  config-store:
+   image: rqlite/rqlite
+   command: -auth /conf/config.json -node-id 1
+   networks:
+     - daemon-net
+   volumes:
+     - ./rqlite/config:/conf
+     - rqlite_data:/rqlite/file
+   ports:
+     - 4001:4001
+
+  app:
+   depends_on:
+     - config-store
+   container_name: nextpyter-daemon
+   image: emilianomaccaferri/nextpyter-daemon:0.0.1-images-stream-optional-fix
+   networks:
+     - daemon-net
+   volumes:
+     - /var/run/docker.sock:/var/run/docker.sock:ro
+   environment:
+     - RUST_BACKTRACE=1
+     - RUST_LOG=trace
+     - PROXY_URI=http://localhost:8081
+     - RQLITE_USER=tango
+     - RQLITE_PASSWORD=test
+     - IMAGES_STREAM_NAME=streams:images_data
+     - REDIS_URI=redis://queue
+     - BIND_VOLUME_PATH=/var/lib/docker/volumes/nextpyter_binds/_data
+     - ORCHESTRATOR=docker
+     - DOCKER_NETWORK=daemon-net
+     - CONFIG_STORE_HOST=config-store:4001
+      
+  proxy:
+    image: nginx
+    networks:
+      - daemon-net
+    volumes:
+      - ./nginx/proxy.conf:/etc/nginx/conf.d/proxy.conf
+      - ./nginx/oauth:/etc/nginx/conf.d/oauth
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./nginx/js:/etc/nginx/js
+    ports:
+      - 8081:14000
+    depends_on:
+      - auth
+      - app
+      - swagger-ui
+
+  swagger-ui:
+    image: swaggerapi/swagger-ui
+    networks:
+      - daemon-net
+
+  pagletto:
+    container_name: pagletto
+    image: emilianomaccaferri/nextpyter-pagletto:0.0.1
+    depends_on:
+      - queue
+    environment:
+      - NOTIFICATION_GROUP=builders
+      - CONSUMER_NAME=notifier-1
+      - BLOCK_TIME=6000 # how much should the consumer block for?
+      - STREAM_NAME=streams:images_data
+      - REDIS_URI=redis://queue
+      - ITEM_COUNT=10
+      - DEAD_KEY_EXPIRY=11000 # how much time should pass before autoclaiming messages?
+      - RQLITE_USER=tango
+      - RQLITE_PASSWORD=test
+      - RQLITE_URI=config-store:4001
+      #- RUST_LOG=trace
+    networks:
+      - daemon-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro      
+  
+  queue:
+    image: valkey/valkey:7.2-bookworm
+    networks:
+      - daemon-net
+    depends_on:
+      - auth # needed so the resolver knows where to point
+
+  auth:
+    build:
+      context: .
+      dockerfile: ./keycloak/Dockerfile
+      network: host
+    depends_on:
+      auth_db:
+        condition: service_healthy
+    entrypoint: ["/opt/keycloak/bin/kc.sh", "start-dev"]
+    environment:
+      - KC_DB=postgres
+      - KC_DB_URL=jdbc:postgresql://auth_db:5432/keycloak
+      - KC_DB_USERNAME=test
+      - KC_DB_PASSWORD=test1
+      - KC_HOSTNAME=localhost
+      - KC_HOSTNAME_PORT=8080
+      - KC_HOSTNAME_STRICT=false
+      - KC_HOSTNAME_STRICT_HTTPS=false
+      - KEYCLOAK_ADMIN=admin
+      - KEYCLOAK_ADMIN_PASSWORD=admin
+    ports:
+      - 8080:8080
+    networks:
+      - daemon-net
+
+  auth_db:
+    image: postgres
+    environment:
+      - POSTGRES_DB=keycloak
+      - POSTGRES_USER=test
+      - POSTGRES_PASSWORD=test1
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d keycloak -U test"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - daemon-net
+
+\end{verbatim}
+
+Tramite l'utilizzo di un \textit{Docker network}, quindi, sarà possibile isolare i componenti del \textit{core} e fare in modo che questi comunichino tra di loro usando esclusivamente i nomi \textit{DNS} dei container.
+\newpage
+\subsection{Limiti di questo \textit{deployment}}
+Questo modo di eseguire \textit{core}, seppur funzionante al 100\%, ha una particolarità che può risultare scomoda nel suo \textit{setup} e manutenzione: il volume al quale i \textit{notebook} dovranno fare riferimento dovrà essere \textbf{condiviso} con tutti gli altri container che dovranno accedere ai dati sui quali i notebook opereranno, in questo caso \textbf{un'eventuale installazione di \textit{Nextcloud}}. Per come sono implementati (si fa riferimento al \textit{driver} standard) i volumi in Docker, questo può generare problemi in termini di permessi di accesso ai file, poiché saranno impostati in base al container che genera tali file. Una soluzione potrebbe essere quella di mappare l'utente all'interno di tutti i container a quello dell'host che esegue il Docker \textit{daemon}, risolvendo effettivamente il problema dei permessi, ma introducendone altri riguardanti la gestione e la flessibilità di questo approccio \cite{owasp-docker}.
+\newline
+Un'effettiva soluzione ai problemi di sicurezza potrebbe essere l'utilizzo di \textit{Podman}\footnote{https://podman.io/}, un'alternativa OCI-compliant\footnote{https://opencontainers.org/} \textit{daemonless} a Docker. Poiché OCI-compliant, quindi aderente agli stessi standard di containerizzazione che Docker usa, Podman può essere effettivamente utilizzato come \textit{drop-in} replacement a Docker, senza cambiare nulla riguardante la configurazione di NextPyter.
+\newline
+Rimane, inoltre, il problema derivante da \textit{Docker-in-Docker} che, sebbene è particolarmente limitato, può comunuque generare problemi in caso \textit{daemon} presentasse delle vulnerabilità.
+\newline
+Questi motivi, assieme ad altri citati precedentemente nei capitoli di introduzione, hanno portato alla migrazione del progetto su Kubernetes.
+\newpage
+\section{NextPyter su Kubernetes}
+Kubernetes è una piattaforma \textit{open-source} per l'orchestrazione di container, progettata per automatizzare il deployment, la gestione e lo scaling di applicazioni containerizzate raggruppate in un \textit{cluster}. Un cluster cluster sarà composto da svariati nodi (fisici o virtualizzati, sostanzialmente i server su cui verranno eseguiti i container), offrendo funzionalità come il bilanciamento del carico, il monitoraggio dello stato delle applicazioni, la gestione della scalabilità automatica e l'auto-riparazione dei container qualora questi presentassero errori. La particolarità di Kubernetes è l'approccio dichiarativo alla configurazione dell'infrastruttura: tramite file \textit{YAML} viene definito lo stato desiderato per i componenti di un'applicazione (ad esempio, quanti container devono essere in esecuzione) e il sistema si occupa di mantenere questo stato in modo autonomo. 
+\newline
+\newline
+Oltre a queste funzionalità, Kubernetes offre degli \textit{standard} per quanto riguarda l'implementazione di molti componenti che lo compongono, come \textit{CNI} (\textit{Container Network Interface}), \textit{CSI} (\textit{Container Storage Interface}) e simili.
+\newline
+In altre parole, dati questi standard completamente \textit{open source} è possibile creare dei cosiddetti \textit{driver} personalizzati che li andranno ad implementare, rendendo estremamente facile l'estensione di nuove tecnologie all'interno di \textit{cluster} Kubernetes. Ad esempio, è possibile implementare in maniera completamente trasparente ai container che ne faranno utilizzo, lo \textit{storage} dei container mediante \textit{iscsi}\footnote{https://github.com/kubernetes-csi/csi-driver-iscsi}, abilitando, di fatto, tutti i concetti che quest'ultimo introduce, senza modificare nulla nel comportamento dei container e di come questi accedono allo \textit{storage}. Kubernetes, quindi, \textit{astrae} completamente la gestione di \textit{network}, \textit{storage} e molto altro e la delega a determinati \textit{driver}, che, rispettando l'interfaccia data, potranno offrire funzionalità estremamente personalizzabili e in maniera altamente modulare.
+\newline
+NextPyter fruirà di queste particolarità per andare a realizzare \textit{deployment} altamente personalizzabili e scalabili in maniera estremamente semplice, integrandosi con Kubernetes in modo completamente trasparente a container e utenti finali.
+\newpage
+\subsection{Utilizzo di \textit{kube-rs} per l'interfaccia con Kubernetes}
+Il \textit{trait} \verb|Orchestrator|, discusso nella sezione \ref{axum-orchestrator} utilizza, come già detto, \textbf{Bollard} per interfacciarsi con Docker (o Podman), mentre fa utilizzo della libreria \textit{kube-rs} per comunicare con i componenti di "amministrazione" di un cluster Kubernetes.
+\subsection{Rimozione di \textit{pagletto} per questa configurazione}
+Kubernetes supporta automaticamente il download di immagini di container quando non sono presenti nel sistema, pertanto il modulo \textit{pagletto}, non è più necessario per un deployment Kubernetes.
+\newline
+Ciò che rimane, però, sarà la parte di configurazione distribuita che permetterà di memorizzare le immagini disponibili su NextPyter, mentre \textit{pagletto} è stato sostituito con il trait \verb|Waitable|, così definito:
+\begin{verbatim}
+use std::fmt::Display;
+
+use axum::async_trait;
+use super::OrchestratorError;
+
+#[async_trait]
+pub trait Waitable {
+    type StatusEnum: ToString;
+    async fn wait(&self, fields: &str, status: Self::StatusEnum) 
+        -> Result<(), OrchestratorError>;
+}
+
+pub struct WaitableKubernetesResource<R> {
+    pub resource: R,
+}
+impl<R> WaitableKubernetesResource<R> {
+    pub fn new(resource: R) -> Self {
+        WaitableKubernetesResource {
+            resource
+        }
+    }
+}
+
+\end{verbatim}
+
+Notare come è stato introdotto anche il tipo \verb|WaitableKubernetesResource<R>|. Questa struttura dati sarà usata come \textit{helper} per poter implementare \textit{trait} su tipi derivanti da altre librerie, cosa che non è possibile fare \textit{direttamente} in Rust per via di come è stato pensato il linguaggio. In particolare, quindi, ogniqualvolta si vorrà implementare il trait \verb|Waitable| su un tipo di un'altra libreria, come \verb|Pod| di \textit{kube-rs}, lo si dovrà \textit{wrappare} in \verb|WaitableKubernetesResource<R>|, come in questo esempio:
+\begin{verbatim}
+#[async_trait]
+impl Waitable for WaitableKubernetesResource<Api<Pod>> {
+
+    type StatusEnum = PodStatusEnum;
+
+    async fn wait(&self, fields: &str, resource_status: Self::StatusEnum)
+    -> Result<(), OrchestratorError> {
+        let wp = WatchParams::default().fields(&fields)
+        .timeout(std::env::var("K8S_WATCH_TIMEOUT")
+            .unwrap_or("10".to_string()).parse().unwrap_or(10)
+        );
+
+        let mut stream = self.resource.watch(&wp, "0").await?.boxed();
+
+        while let Some(status) = stream.try_next().await? {
+            match status {
+                WatchEvent::Modified(o) => {
+                    if let Some(s) = o.status.as_ref(){
+                        let phase = s.phase.clone().unwrap_or_default();
+                        if phase.eq(&resource_status.to_string()) {
+                            break;
+                        }
+                    }
+                }
+                WatchEvent::Error(e) => {
+                    return Err(e.into())
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+\end{verbatim}
+Ciò che fa il trait \verb|Waitable|, sostanzialmente, è aspettare che una risorsa Kubernetes venga messa nello stato che viene passato al metodo \verb|wait|, a significare che la risorsa è pronta per essere usata.
+\newline
+Questa funzionalità è ampiamente utilizzata nella \textit{codebase} di NextPyter, come in questo esempio:
+\begin{verbatim}
+async fn start_notebook_container(
+    &self, 
+    container_name: &str,
+    container_image: &str,
+    container_command: Vec<&str>,
+    volume_name: &str,
+    filename: Option<&str>,
+) -> Result<String, OrchestratorError>{
+
+    let pod_api: Api<Pod> = Api::namespaced(
+        self.runtime.clone(), 
+        &get_k8s_namespace()
+    );
+
+    // dettagli omessi per chiarezza
+    let pod_definition: Pod = serde_json::from_value(json!({...})?;
+
+    pod_api
+        .create(&PostParams::default(), &pod_definition)
+        .await?;
+
+    let waitable_pod = WaitableKubernetesResource::new(pod_api);
+
+    // https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/#pod-phase
+    waitable_pod.wait(
+        &format!("metadata.name={}", container_name), 
+        PodStatusEnum::Running
+    )
+    .await?;
+        
+    Ok(build_notebook_uri(container_name, filename))
+
+}
+\end{verbatim}
+Come anticipato, si crea l'oggetto che si vuole "aspettare" e lo si \textit{wrappa} nel tipo \verb|WaitableKubernetesResource|. A questo punto, basta chiamare il metodo \verb|wait|, al quale si passerà lo stato che si vorrà "aspettare" (in questo caso si vuole attendere che il \verb|Pod| parta, quindi si utilizza \verb|PodStatusEnum::Running|).
+\newline
+Anche questa semplice interfaccia permette di standardizzare il framework di NextPyter, rendendolo molto più mantenibile.
+\newpage
+\subsection{\textit{ServiceAccount} per il modulo \textit{daemon}}
+Sebbene la \textit{codebase} del modulo \textit{daemon} sia completamente trasparente, in termini di utilizzo, rispetto all'orchestratore in uso, Kubernetes è \textit{molto} diverso da Docker in termini di architettura.
+\newline
+In particolare, Kubernetes è composto da tre principali moduli:
+\begin{itemize}
+    \item \textbf{kube-scheduler}: componente incaricato di gestire dove \textit{e come} posizionare i container all'interno di un cluster;
+    \item \textbf{kube-controller-manager}: gestisce il ciclo di vita delle risorse all'interno di un cluster, controllando quando queste non sono più raggiungibili o quando necessitano di attenzione;
+    \item \textbf{etcd}: componente che permette di memorizzare la configurazione del cluster in maniera distribuita e \textit{fault-tolerant}.
+\end{itemize}
+Per poter interagire con questi componenti, Kubernetes rende disponibile un quarto componente, \textbf{kube-apiserver}, che espone una API HTTP tramite la quale è possibile interagire in maniera programmatica con il cluster.
+\newline
+Per accedere a questa API in maniera programmatica, è necessario creare un \textit{ServiceAccount}\footnote{https://kubernetes.io/docs/concepts/security/service-accounts/}, con terminologia particolarmente simile a quella usata in \textit{OAuth2}, per poter regolare gli accessi alle risorse esposte da \textit{kube-apiserver}.
+\newline
+Un \textit{service account} è un tipo di credenziale che permette di far accedere container \textit{interni} al cluster a \textit{kube-apiserver}. In questa maniera, i \textit{pod} a cui sono associati determinati \textit{service account} potranno identificarsi verso il cluster e accedere alle risorse per cui hanno determinati permessi.
+\newline
+A differenza di Docker, Kubernetes necessita che vengano create questo genere di credenziali per accedere alla API HTTP che esso espone, per aggiungere un layer di sicurezza addizionale.
+\newline
+Creare un \textit{service account} è particolarmente semplice:
+\begin{verbatim}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: notebook-creator-sa
+  namespace: nextpyter-core
+\end{verbatim}
+Di base, un \textit{service account} non ha alcun permesso, pertanto è necessario creare un \textit{Role}:
+\begin{verbatim}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  namespace: nextpyter-core
+  name: notebook-creator
+rules:
+- apiGroups: [""] # "" indicates the core API group
+  resources: ["pods"]
+  resourceNames: ["notebook-*"]
+  verbs: ["create", "watch", "list", "get", "delete"]
+\end{verbatim}
+Il \textit{role} raccoglie determinati permessi che verranno associati ad un \textit{service account} mediante un \textit{role binding}:
+\begin{verbatim}
+kind: RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+metadata:
+  name: notebook-creator-binding
+  namespace: nextpyter-core
+subjects:
+  - kind: ServiceAccount
+    name: notebook-creator-sa
+    namespace: nextpyter-core
+roleRef:
+  kind: Role
+  name: notebook-creator
+  apiGroup: rbac.authorization.k8s.io
+\end{verbatim}
+In questo modo, i \textit{pod} che avranno questo \textit{service account} associato potranno interrogare \textbf{kube-apiserver} per \textit{creare, osservare, elencare, rimuovere e ottenere informazioni} riguardanti le risorse che contengono la stringa \verb|notebook-| all'interno del proprio nome.
+\newline
+Associare un \textit{service account} a un \textit{pod} è immediato:
+\begin{verbatim}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: daemon-deployment
+  namespace: nextpyter-core
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: daemon
+  template:
+    metadata:
+      labels:
+        app: daemon
+    spec:
+      # qua viene mappato il service account
+      serviceAccountName: notebook-creator-sa 
+      containers:
+      - name: daemon
+        image: emilianomaccaferri/nextpyter-daemon:0.0.1-subpath
+        imagePullPolicy: IfNotPresent
+        # altri dettagli omessi per brevità... 
+\end{verbatim}
+In questa maniera, quindi, è possibile fare comunicare \textit{daemon} con \textit{kube-apiserver} un po' come veniva fatto tramite l'apporccio \textit{DinD}, senza però ricorrere a soluzioni che potrebbero causare vulnerabilità di privilege escalation all'interno del sistema, poiché viene esplicitamente dichiarato ciò che un container può fare quando andrà a contattare l'\textit{apiserver} di Kubernetes.
+\newline
+Notare come \textit{daemon} venga immesso nel cluster tramite un \textit{Deployment}, un particolare costrutto Kubernetes che permette di creare delle repliche \textit{stateless} di un'applicazione.
+\newline
+La creazione di un cluster con NextPyter verrà comunque dettagliata maggiormente tra qualche sezione.
+\newpage
+\subsection{RQLite su Kubernetes}
+Il deployment di RQLite su Kubernetes necessita di particolari accortezze per garantire la corretta replicazione e conservazione dei dati.
+\newline
+\subsubsection{\textit{StatefulSets}}
+Uno \textit{StatefulSet} è un particolare tipo di risorsa che viene usata in un cluster Kubernetes per creare una serie di \textit{pod} identici, ma non intercambiabili (a differenza di un \textit{Deployment}).
+\newline
+Uno \textit{StatefulSet} permette di mantenere, quindi, persistenza "deterministica" anche in caso i \textit{pod} che fanno parte di tale \textit{StatefulSet} siano soggetti a problematiche.
+\newline
+Il classico caso d'uso per questo genere di risorsa è quello dei database distribuiti, come \textit{RQLite}: applicazioni di questo tipo, generalmente, mantengono relazioni di subordinazione tra i componenti che stabiliscono principalmente l'ordine nel quale i dati sul database vengono inseriti.
+\newline
+I componenti di \textit{RQLite}, per funzionare correttamente, hanno bisogno di persistenza a livello di nomi di container e a livello di storage, rendendo lo \textit{StatefulSet} la risorsa perfetta da utilizzare in questo caso.
+\newline
+In particolare, quando i nodi di un cluster \textit{RQLite} vanno online, questi registrano la loro identità verso i \textit{leader} del cluster, eletto tramite protocollo \textit{raft}. A questo punto, tutte le scritture sul database passeranno per i nodi \textit{leader}, che terranno un registro degli eventi che accadono sul cluster stesso.
+\newline
+Se uno dei nodi \textit{RQLite} va offline, Kubernetes provvederà a farlo tornare online al più presto. Quando questo tornerà online, la sua identità dovrà essere ripristinata completamente e che i dati che il nodo gestiva precedentemente vengano ad esso riassociati. Lo \textit{StatefulSet} farà esattamente questo: quando il \textit{pod} precedentemente andato offline tornerà operativo verrà riassociato alla sua identità e al \textit{volume} dei dati che gestiva precedentemente all'arresto.
+
+\subsubsection{Storage: PV, PVC e \textit{storage classes}}
+Da documentazione\footnote{https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#limitations}, gli \textit{stateful set} richiedono che i dati riguardanti i \textit{pod} che lo compongano vengano memorizzati utilizzando dei \textit{persistent volumes} (PV), che potranno essere creati manualmente o tramite \textit{storage classes}, che verranno dettagliate tra poco.
+\newline
+Un \textit{persistent volume}, in Kubernetes, rappresenta, in breve, un dispositivo di memorizzazione dati fruibile dal cluster. Questa particolare risorsa permette di astrarre completamente i dettagli dell'implementazione di questo dispositivo di storage (che potrà essere \textit{iscsi}, \textit{Ceph-like}, persino \textit{bucket S3}, ...) dal cluster, in maniera da rendere trasparente l'accesso ai dati da parte dei \textit{pod}.
+\newline
+Per accedere ad un \textit{persistent volume}, un \textit{pod} dovrà fare un \textit{persistent volume \textbf{claim}} (PVC), sostanzialmente una "richiesta" di utilizzo di un \textit{persistent volume}. Vi potrà essere \textbf{al massimo} un PVC per PV, ma a tale PVC potranno fare riferimento tanti \textit{pod} diversi, come in figura \ref{fig:pvc-to-pv}.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{files/images/pvc-to-pv.png}
+    \caption{Funzionamento di PVC e PV}
+    \label{fig:pvc-to-pv}
+\end{figure}
+\newline
+In questo modo, tutti i \textit{pod} che fanno riferimento allo stesso PVC "vedranno" lo stesso filesystem, al quale potranno fare modifiche, eventualmente, in simultanea: questo è, sostanzialmente, il motivo per il quale gli \textit{stateful set} richiedono dei \textit{persistent volume} dedicati \textbf{per pod}! In questa maniera, ciascun \textit{pod} farà riferimento ad una porzione di storage completamente indipendente dalle altre, in maniera da accedere ai file senza problemi di concorrenza. Questo concetto è fondamentale quando si devono implementare database distribuiti su Kubernetes. RQLite, infatti, utilizza un log distribuito per replicare i dati sui vari nodi: la richiesta di scrittura arriva sul nodo autoritativo, questo fa partire una transazione distribuita e impone a tutti i nodi di replicare tale scrittura e, quando la maggioranza dei nodi ha finito, la scrittura sarà marcata come "completa". Ora, si supponga che uno dei nodi, che chiameremo \textit{n-1}, del cluster RQLite vada offline e che nel periodo in cui questo non è disponibile vengano effettuate diverse scritture sul cluster. Quando \textit{n-1} tornerà online, controllerà il log distribuito e scriverà, nella sua parte di storage, indipendente dalle altre, i record mancanti.
+\newline
+Questo meccanismo sarebbe molto più complicato da implementare senza \textit{persistent volume} separati, poiché all'avvio di \textit{n-1}, per prima cosa, questo sovrascriverebbe i record già esistenti (inutilmente). Inoltre, quando più applicazioni fanno riferimento agli stessi file, le logiche di accesso a questi ultimi non sono sempre deterministiche e potrebbero risultare in problemi derivanti da \textit{race condition}, rendendo quasi impossibile il soddisfacimento delle garanzie che un database \textit{ACID} riesce a dare. 
+\newline
+Il \textit{deployment} di RQLite in NextPyter, quindi, ha la struttura visibile in figura \ref{fig:rqlite-storage-deployment}.
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.75\textwidth]{files/images/rqlite-deployment.png}
+    \caption{Schema deployment storage RQLite}
+    \label{fig:rqlite-storage-deployment}
+\end{figure}
+Per gli \textit{stateful set}, quindi, vengono assegnati ai pod dei PV "vuoti" inizialmente, che derivano, generalmente, da un dispositivo a blocchi. Viene riservata, infatti, una capacità di spazio arbitraria che viene data "in prestito" al pod, che la userà per il periodo di durata dello \textit{stateful set}.
+\newline
+Generalmente, poiché creare \textit{persistent volume} è una pratica abbastanza ripetitiva, è buona norma definire una \textit{storage class}, sostanzialmente un componente che si andrà ad occupare del \textit{provisioning} automatico dei \textit{persistent} volume richiesti da determinati \textit{pod}.
+\newline
+In questo modo, alla creazione dei pod di uno \textit{stateful set}, questi andranno ad interrogare la \textit{storage class} per richiedere dei \textit{persistent volume}, che verranno automaticamente generati ed assegnati a quest'ultimo.
+\subsubsection{OpenEBS}
+Una \textit{storage class} richiederà la presenza di un \textit{provisioner}, assimilabile ad un \textit{driver} che si interfaccerà col dispositivo a blocchi dal quale si riserverà lo spazio. A questo pro è stato scelto OpenEBS\footnote{https://openebs.io/}, che permetterà di potersi interfacciare con \textit{pool zfs} per gestire i dati di applicazioni \textit{stateful}.
+\newline
+In sostanza, quindi, un \textit{pod} di uno \textit{stateful set} farà una "richiesta di spazio" ad una determinata storage class e quest'ultima si interfaccerà direttamente col \textit{provisioner} che creerà PV e PVC richiesti dal \textit{pod}. Configurare questo processo è molto semplice, una volta installato il provisioner:
+\begin{verbatim}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: dynamic-openebs
+  namespace: nextpyter-core
+parameters:
+  recordsize: "128k"
+  compression: "off"
+  dedup: "off"
+  fstype: "zfs"
+  poolname: "zfspv-pool"
+provisioner: zfs.csi.openebs.io 
+\end{verbatim}
+Come si può vedere, una \textit{storage class} conterrà tutti i parametri che verranno utilizzati per accedere al \textit{provisioner}, in modo da centralizzarne la configurazione.
+\newline
+A questo punto, un \textit{pod} dovrà soltanto fare riferimento alla \textit{storage class}:
+\begin{verbatim}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: rqlite
+  namespace: nextpyter-core
+spec:
+  selector:
+    matchLabels:
+      app: rqlite 
+  # dettagli omessi per brevità...
+  volumeClaimTemplates:
+  - metadata:
+      name: rqlite-file
+    spec:
+      accessModes: [ "ReadWriteOncePod" ]
+      storageClassName: dynamic-openebs # nome della storage class
+      resources:
+        requests:
+          storage: 1Gi # richiesta di storage
+\end{verbatim}
+Inoltre, l'accesso ad un \textit{persistent volume} potrà essere configurato in vari modi:
+\begin{itemize}
+    \item \verb|ReadWriteOnce|: il volume può essere acceduto in maniera \textit{read-write} da un singolo \textbf{nodo} (non \textit{pod}!) del cluster;
+    \item \verb|ReadOnlyMany|: il volume può essere acceduto in maniera \textit{read-only} da tanti nodi;
+    \item \verb|ReadWriteMany|: come il precedente, ma \textit{read-write};
+    \item \verb|ReadWriteOncePod|: come \verb|ReadWriteOnce|, ma per \textbf{singolo pod}, rendendo l'accesso al volume molto più granulare. 
+\end{itemize}
+\newpage
+\subsection{Gestione storage dei notebook}
+La questione della gestione \textit{indipendente} e "\textit{sicura}" dei volumi dei notebook è già stata evidenziata come requisito critico di NextPyter, pertanto, in questa sezione, si va a documentare la sua implementazione mediante \textit{Datashim}\footnote{https://datashim.io/}.
+\newline
+Come abbiamo già visto in precedenza, la gestione dei volumi è di vitale importanza per una serie di aspetti di sicurezza molto critici ed è di difficile modellazione con un semplice \textit{deployment} tramite Docker Compose. Sfruttando le interfacce che Kubernetes ha da offrire, però, è stato possibile realizzare un sistema che permetta l'accesso ai dati in maniera sicura da parte dei notebook, senza dover specificare permessi speciali e quant'altro.
+\newline
+Datashim è un progetto open-source che ha come scopo quello di semplificare drasticamente la gestione dei PVC per \textit{pod} non stateful all'interno di un cluster Kubernetes, permettendo di astrarre, tramite il concetto di \verb|Dataset|, quello che è la gestione e il provisioning di PVC.
+\subsubsection{Supporto a \textit{bucket S3}}
+L'idea alla base di NextPyter è quella della modularità ed indipendenza dei componenti nella maniera più estrema possibile e lo \textit{storage} è quello più difficile da astrarre, per via della coesione che quest'ultimo ha con il sistema sottostante.
+\newline
+NextPyter su Kubernetes, però, è una piattaforma completamente \textit{storage agnostic}, data la estrema astrazione che Kubernetes è in grado di offrire grazie alla sua potente API. In particolare, a prova di quanto detto, si è voluto portare il concetto di \textit{"storage-agnosticness"} all'estremo, offrendo supporto a \textit{bucket S3} completamente dislocati dall'infrastruttura fisica su cui si trova il cluster \textit{Kubernetes}.
+\newline
+Ciò che si è voluto realizzare è visibile in figura \ref{fig:s3-bucket}
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=1\textwidth]{files/images/s3-bucket.png}
+    \caption{Storage notebook completamente decentralizzato tramite bucket S3}
+    \label{fig:s3-bucket}
+\end{figure}
+In sostanza, i notebook vedranno i loro dati risiedere su un bucket S3 in una location "fisica" completamente diversa dalla loro, per giunta su un servizio \textit{managed} esterno, in modo da azzerare completamente la complessità di gestione di questi ultimi.
+\newline
+Tramite \textit{Datashim} è possibile configurare tutto questo in maniera estremamente semplice:
+\begin{verbatim}
+apiVersion: datashim.io/v1alpha1
+kind: Dataset
+metadata:
+  name: nextpyter-notebook-data
+  namespace: nextpyter-core
+spec:
+  local:
+    storage:
+      type: object
+      access:
+        accessKeyId: valore-accessKeyId
+        secretAccessKey: valore-secretAccessKey
+        endpoint: endpoint
+        bucketName: nome-bucket
+
+\end{verbatim}
+In questo modo, Datashim creerà un PV che rappresenterà il bucket S3 configurato, che sarà accessibile in maniera completamente trasparente dai \textit{pod} come un PVC. Il modulo \textit{daemon}, infatti, farà riferimento al \textit{dataset} appena creato per accedere al bucket in questione:
+\begin{verbatim}
+let split: Vec<&str> = volume_name.split(":").collect();
+// volume_name è, ad esempio: "nome-dataset:/sottocartella/esempio"
+// ...
+let pod_definition: Pod = serde_json::from_value(json!({
+    "apiVersion": "v1",
+    "kind": "Pod",
+    "metadata": { 
+        // ...
+        "labels": {
+            "dataset.0.id": split[0],
+            "dataset.0.useas": "mount",
+            "taint": "nextpyter-notebook",
+        }
+    },
+    "spec": {
+        // ... 
+        "volumes": [
+            {
+                "name": "notebook-volume",
+                "persistentVolumeClaim": {
+                    "claimName": split[0]
+                }
+            }
+        ],
+        "containers": [{
+            // ...
+            "volumeMounts": [
+                {
+                    "mountPath": "/home/nextpyter",
+                    "name": "notebook-volume",
+                    "subPath": split[1],
+                }
+            ],
+            // ...
+            ]
+        }] 
+    }
+}))?;
+
+pod_api
+    .create(&PostParams::default(), &pod_definition)
+    .await?;
+\end{verbatim}
+In questo modo, i notebook potranno fruire in maniera completamente trasparente delle funzionalità del dataset appena creato con Datashim, riferendosi a quest'ultimo mediante l'utilizzo di una \textit{label} e dei campi \textit{claimName} e \textit{subPath} della configurazione dei volumi del \textit{pod}.
+\newline
+Ovviamente questa non è l'unica configurazione supportata, ovviamente, infatti è possibile creare, con altrettanta facilità, il supporto a storage basato su \textit{NFS}\footnote{https://ubuntu.com/server/docs/network-file-system-nfs}, poiché Datashim lo supporta nativamente. È stata scelta volutamente questa configurazione per dimostrare l'estrema elasticità della piattaforma, anche in termini di tipo di storage.
+\newpage
+\subsection{Helm per semplificare il deploy di NextPyter}
+Sebbene completo e funzionante, NextPyter è composto da tante \textit{moving parts}, che vanno configurate e di cui va effettuato il \textit{deployment singolarmente}: i moduli \textit{core}, la gestione degli \textit{stateful sets} di cui abbiamo parlato precedentemente, la creazione dei \textit{dataset} di Datashim, la configurazione di NGINX, ...
+\newline
+Vi sono molte cose da fare e sarebbe interessante trovare un modo per "pacchettizzare" tutte queste operazioni in un singolo "blocco" ed eseguirle tutte insieme in automatico, magari personalizzando alcuni aspetti. Questo è esattamente il caso d'uso di \textit{Helm}, uno strumento che permette di gestire le applicazioni che andranno eseguite sui cluster Kubernetes (e le loro dipendenze) modellandole come "pacchetti" facilitando la definizione, l'installazione e l'aggiornamento di queste ultime. I "pacchetti" Helm sono chiamati \textit{charts} e contengono template YAML predefiniti per descrivere in modo dichiarativo le configurazioni delle varie risorse come \textit{pod}, \textit{stateful set} e quant'altro. Questo permette di gestire facilmente le dipendenze tra componenti software e di automatizzare i processi di rilascio, promuovendo la riproducibilità e la consistenza tra ambienti. Helm, inoltre, adotta un sistema di versionamento che facilita la gestione dei cicli di vita delle applicazioni, con la possibilità di eseguire rollback rapidi a versioni precedenti in caso di errori. L’utilizzo di repository di \textit{charts}, sia pubbliche che private, incoraggia il riutilizzo di configurazioni e contribuisce alla standardizzazione dei deployment in ambienti di produzione e sviluppo.
+\newline
+\subsubsection{Struttura della \textit{Helm chart} di NextPyter}
+La \textit{Helm chart}\footnote{https://gitlab.com/nextpyter/helm-chart} di NextPyter è stata creata, per l'appunto, per semplificare il deployment di tutte le componenti che vanno a rendere utilizzabile la piattaforma.
+\newline
+Nella cartella \textit{templates}\footnote{https://gitlab.com/nextpyter/helm-chart/-/tree/main/templates} sono definite tutte le risorse che andranno inserite nel cluster Kubernetes, sottoforma di, appunto, \textit{template Go}, sostanzialmente dei file che vengono interpretati da \textit{Helm} nei quali verranno sostituite le variabili definite con dei valori stabiliti a monte.
+\newline
+Questo, ad esempio, è il \textit{template} che fa riferimento alla creazione della \textit{storage class} che servirà agli \textit{stateful set} per operare correttamente:
+\newpage
+\begin{verbatim}   
+{{- if eq .Values.zfs true }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: dynamic-openebs
+  namespace: {{ include "nextpyter.core-namespace" . }}
+parameters:
+  recordsize: "128k"
+  compression: "off"
+  dedup: "off"
+  fstype: "zfs"
+  poolname: "zfspv-pool"
+provisioner: zfs.csi.openebs.io
+{{- if .Values.storageNodes }}
+allowedTopologies:
+- matchLabelExpressions:
+  - key: kubernetes.io/hostname
+    values: 
+      {{- range .Values.storageNodes | default nil }}
+      - {{ . }}
+      {{- end}}
+{{- end }}
+{{- else }}
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: dynamic-openebs
+  namespace: {{ include "nextpyter.core-namespace" . }}
+allowVolumeExpansion: true
+parameters:
+  storage: "lvm"
+  volgroup: "lvmvg"
+provisioner: local.csi.openebs.io
+{{- if .Values.storageNodes }}
+allowedTopologies:
+- matchLabelExpressions:
+  - key: kubernetes.io/hostname
+    values: 
+      {{- range .Values.storageNodes | default nil }}
+      - {{ . }}
+      {{- end}}
+{{- end }}
+{{- end}}
+\end{verbatim}
+All'interno della \textit{chart}, inoltre, si troverà un file chiamato \verb|values.yaml|, che potrà essere utilizzato per personalizzare l'installazione di NextPyter mediante Helm.
+\newline
+La struttura del file è molto semplice ed intuitiva:
+\begin{verbatim}
+# datashim storage configuration
+storage:
+  type: object
+  access:
+    accessKeyId: accessKeyId
+    secretAccessKey: secretAccessKey
+    endpoint: endpoint
+    bucketName: bucket
+
+# NGINX proxy configuration  
+proxy: 
+  use_keycloak: false
+  external_uri: https://app.test.com
+  replicas: 5
+  # utilizzabili solo se use_keycloak: true
+  # introspection_endpoint: ...
+  # token_endpoint: ...
+  # oauth_client_id: client_name
+  # oauth_client_secret: client_secret
+  service:
+    # può essere anche ClusterIP
+    type: NodePort
+    hostPort: 34000
+
+rqlite:
+  replicas: 3
+  username: tango
+  password: test
+
+daemon:
+  replicas: 3
+
+storageNodes:
+    - node1
+    - node2
+zfs: false
+core_namespace_name: nextpyter-core
+
+\end{verbatim}
+Nota: la proprietà \verb|storageNodes| permette di definire una serie di nodi che offriranno funzionalità di \textit{storage}, sostanzialmente indicherà i nodi che accoglieranno "fisicamente" i volumi degli \textit{stateful sets}. Se non viene impostato, \textbg{tutti i nodi verranno considerati come storage nodes}!
+\newline
+Per installare NextPyter utilizzando la Helm chart, basterà clonare la repository ed eseguire il comando:
+\begin{verbatim}
+    helm install nextpyter -f values.yaml .
+\end{verbatim}
+In questo modo verrà applicata la configurazione scelta e, in maniera estremamente semplice, NextPyter sarà installato sul cluster Kubernetes di riferimento.
+\newpage

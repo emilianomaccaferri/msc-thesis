@@ -1,0 +1,148 @@
+% Twoside implica che i capitoli inizino sempre con la prima pagina a sinistra, eventualmente lasciando una pagina vuota nel capitolo precedente. 
+\documentclass[a4paper, twoside,openright]{report}
+
+% Dimensione dei margini
+\usepackage[a4paper,top=3cm,bottom=3cm,left=3cm,right=3cm]{geometry} 
+% Dimensione del font
+\usepackage[fontsize=13pt]{scrextend}
+% Lingua del testo
+\usepackage[english,italian]{babel}
+% Lingua per la bibliografia
+\usepackage[fixlanguage]{babelbib}
+% Codifica del testo
+\usepackage[utf8]{inputenc} 
+% Encoding del testo
+\usepackage[T1]{fontenc}
+% Per modificare l'header delle pagine 
+\usepackage{fancyhdr}               
+
+\usepackage{float}
+
+% Librerie matematiche
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsthm}         
+
+% Uso delle immagini
+\usepackage{graphicx}
+% Uso dei colori
+\usepackage[dvipsnames]{xcolor}         
+% Uso dei listing per il codice
+\usepackage{listings}          
+% Per inserire gli hyperlinks tra i vari elementi del testo 
+\usepackage{hyperref}     
+% Diversi tipi di sottolineature
+\usepackage[normalem]{ulem}
+
+% -----------------------------------------------------------------
+
+% Modifica lo stile dell'header
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\rightmark}
+\rhead{\textbf{\thepage}}
+\fancyfoot{}
+\setlength{\headheight}{16pt}
+
+% Rimuove il numero di pagina all'inizio dei capitoli
+\fancypagestyle{plain}{
+  \fancyfoot{}
+  \fancyhead{}
+  \renewcommand{\headrulewidth}{0pt}
+}
+
+\definecolor{backcolour}{rgb}{0.90,0.95,0.92}
+
+% Stile del codice
+% \lstset{style=codeStyle}
+\lstdefinestyle{codeStyle}{
+    backgroundcolor=\color{backcolour},
+    commentstyle=\color{teal},
+    keywordstyle=\color{Magenta},
+    numberstyle=\tiny\color{gray},
+    stringstyle=\color{violet},
+    basicstyle=\ttfamily\scriptsize,
+    breakatwhitespace=false,     
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,
+    tabsize=1
+} \lstset{style=codeStyle}
+
+% \lstset{style=longBlock}
+\lstdefinestyle{longBlock}{
+    commentstyle=\color{teal},
+    keywordstyle=\color{Magenta},
+    numberstyle=\tiny\color{gray},
+    stringstyle=\color{violet},
+    basicstyle=\ttfamily\scriptsize,
+    breakatwhitespace=false,         
+    breaklines=true,                 
+    captionpos=b,                    
+    keepspaces=true,                 
+    numbers=left,                    
+    numbersep=5pt,                  
+    showspaces=false,                
+    showstringspaces=false,
+    showtabs=false,                  
+    tabsize=2
+} \lstset{style=codeStyle}
+
+% Togliendo il commento al comando che segue, si inseriscono nella bibliografia anche le fonti presenti in Bibliography.bib ma non citati direttamente con il comando \cite
+\nocite{*}
+
+% Margini prima e dopo blocchi di codice, per avere più distanza
+\lstset{aboveskip=20pt,belowskip=20pt}
+
+% Modifica dello stile dei riferimenti
+\hypersetup{
+    colorlinks,
+    linkcolor=black,
+    citecolor=black
+}
+
+% Aggiunti definizioni, teoremi, linea e listing
+\newtheorem{definition}{Definizione}[section]
+\newtheorem{theorem}{Teorema}[section]
+\providecommand*\definitionautorefname{Definizione}
+\providecommand*\theoremautorefname{Teorema}
+\providecommand*{\listingautorefname}{Listing}
+\providecommand*\lstnumberautorefname{Linea}
+
+\raggedbottom
+
+
+
+% -----------------------------------------------------------------
+\begin{document}
+\include{chapters/cover-page}
+\let\cleardoublepage\clearpage
+\dedication{\textit{
+    Dediche:\newline
+    A Eleonora e alla sua immensa presenza in tutte le mie vite.\newline
+    Ai miei genitori, sempre al mio fianco, senza mai chiedere niente in cambio.\newline
+    A Barbara, Tiziano, Leonardo, Marcello e Michele, la mia seconda famiglia. 
+}}
+\newpage
+
+\section*{Ringraziamenti}
+Voglio ringraziare immensamente tutto il personale del CRIS per la loro calorosità e disponibilità durante il mio tirocinio, in particolare Francesco e Giovanni, due persone che mi hanno trasmesso la loro positività sin da subito, affiancandomi in questo bellissimo progetto, dandomi tutti gli strumenti di cui avevo bisogno, dando lustro all'istituzione che è l'Università di Modena e Reggio Emilia.
+\newline
+\newline
+Il CRIS è molto più che un insieme di persone che fanno ricerca, in questo laboratorio ho potuto respirare quella che è veramente l'aria che dovrebbe tirare in tutte le università d'Italia: la sicurezza, nel senso emotivo, il rispetto reciproco e la totale assenza di percezione di subordinazione che una persona prova quando mette piede per la prima volta in questo splendido ambiente sono sensazioni che non ho mai provato e che faranno sicuramente da riferimento per tutte le esperienze, lavorative e non, che vorrò intraprendere nella mia vita.
+\tableofcontents
+
+\listoffigures
+\include{chapters/introduction}
+\include{chapters/chapter-ii}
+\include{chapters/chapter-iii}
+\include{chapters/chapter-iv}
+\include{chapters/chapter-v}
+\bibliographystyle{unsrt}
+\bibliography{main}
+\end{document}
