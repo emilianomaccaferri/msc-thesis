@@ -4,3 +4,8 @@ NextPyter si pone come obiettivo la creazione di una piattaforma che faciliti l'
 La tesi aveva come scopo quello di descrivere il funzionamento del \textit{core} di NextPyter, modulo che al momento è completo e funzionante, ma verranno effettuati ultieriori sviluppi per poter adeguare totalmente la piattaforma, comprendendo, quindi, Nextcloud e altre tecnologie di supporto.
 \newline
 Sono state effettuate due pubblicazioni scientifiche\cite{nextpyter-work-1}\cite{nextpyter-work-2} riguardo NextPyter, a dimostrazione che il progetto è in continua evoluzione.
+
+\section{Sviluppi futuri}
+Gli sviluppi futuri includeranno sicuramente il supporto ad un'autenticazione "offline" delle richieste, liberandosi quindi del supporto dell'\textit{introspection endpoint} nell'approccio descritto in \ref{reverse-proxy-oauth}, in modo da garantire un'autenticazione più veloce e che genera meno traffico all'interno del sistema. Ciò che si vuole implementare, in particolare, è una verifica crittografica a livello di \textit{application gateway}, dato che i token che viaggiano nel sistema sono \textit{JWT}, sfruttando le \textit{JWK}\footnote{https://datatracker.ietf.org/doc/html/rfc7517} esposte da Keycloak.
+\newline
+Altre migliorie verranno integrate per quanto riguarda lo \textit{scheduling} dei pod, infatti è già in creazione il supporto per integrare pod che necessitano di essere GPU-accelerated, che verranno \textit{schedulati} su nodi specifici (con GPU, per l'appunto). Per ora si mira a supportare GPU NVIDIA, ma è già stata individuata una modalità per integrare anche nodi che montano GPU AMD, a supporto di cluster più eterogenei.

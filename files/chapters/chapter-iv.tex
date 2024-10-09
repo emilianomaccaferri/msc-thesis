@@ -961,7 +961,7 @@ server{
 Sono state descritte le direttive che verranno utilizzate all'interno di NextPyter, ma, ovviamente, NGINX può fare molto più di quello che è scritto in questa breve introduzione.
 \newline
 Un'ultieriore osservazione può essere fatta sull'indirizzo che è specificato nella direttiva \verb|proxy_pass|: quell'indirizzo è un \textit{nome DNS}, non un indirizzo IP, pertanto è necessario configurare NGINX, come si è visto in precedenza, in modo tale che supporti un \textit{resolver} che contenga tale nome. Di uguale importanza è il fatto che tutti i servizi che vengono raggiunti in questo modo \textbf{dovranno essere già online} quando NGINX caricherà questa configurazione, perché dovranno essere risolti in modo da associarvi un IP.
-\subsubsection{Reverse proxy per i notebook}
+\subsubsection{Reverse proxy per i notebook} \label{reverse-proxy-oauth}
 La configurazione precedente si basa su un \textit{matching statico}, nel senso che sia la \verb|location| che la direttiva \verb|proxy_pass| agiscono su stringhe \textit{statiche}: tutte le richieste che soddisfano il path \verb|/something/*| verranno \textit{sempre} reindirizzate a \newline\verb|http://service-inside-docker:8080/*|.\newline
 Poiché i nomi dei notebook, quando eseguiti da \textit{daemon}, sono generati randomicamente e in una maniera non deterministica, è necessario introdurre il concetto di \textit{pattern matching} all'interno dei blocchi \verb|location|.\newline
 Ipotizzando che gli URL dei notebook avranno forma del tipo
@@ -1936,7 +1936,7 @@ pod_api
 \end{verbatim}
 In questo modo, i notebook potranno fruire in maniera completamente trasparente delle funzionalità del dataset appena creato con Datashim, riferendosi a quest'ultimo mediante l'utilizzo di una \textit{label} e dei campi \textit{claimName} e \textit{subPath} della configurazione dei volumi del \textit{pod}.
 \newline
-Ovviamente questa non è l'unica configurazione supportata, ovviamente, infatti è possibile creare, con altrettanta facilità, il supporto a storage basato su \textit{NFS}\footnote{https://ubuntu.com/server/docs/network-file-system-nfs}, poiché Datashim lo supporta nativamente. È stata scelta volutamente questa configurazione per dimostrare l'estrema elasticità della piattaforma, anche in termini di tipo di storage.
+Ovviamente questa non è l'unica configurazione supportata, ovviamente, infatti è possibile creare, con altrettanta facilità, il supporto a storage basato su \textit{NFS}\footnote{https://ubuntu.com/server/docs/network-file-system-nfs}, poiché Datashim lo supporta nativamente. È stata scelta volutamente questa configurazione per dimostrare l'estrema elasticità della piattaforma, anche in termini di tipo di storage. 
 \newpage
 \subsection{Helm per semplificare il deploy di NextPyter}
 Sebbene completo e funzionante, NextPyter è composto da tante \textit{moving parts}, che vanno configurate e di cui va effettuato il \textit{deployment singolarmente}: i moduli \textit{core}, la gestione degli \textit{stateful sets} di cui abbiamo parlato precedentemente, la creazione dei \textit{dataset} di Datashim, la configurazione di NGINX, ...

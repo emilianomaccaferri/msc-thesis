@@ -2,7 +2,11 @@
 Il lavoro descritto in questa tesi è il frutto di una seconda iterazione di sviluppo e cambiamenti su codice già esistente. Infatti, è stata ereditata una \textit{codebase}, che verrà indicata con il nome \textit{NextPyter "1.0"}, sulla quale era necessario effettuare modifiche per migliorare il progetto esistente, oltre che migrare la piattaforma ad una soluzione facilmente distribuibile su \textit{Kubernetes}. \newline
 Verrà esplorato brevemente l'ottimo lavoro effettuato in precedenza e la sua architettura, verrà fatta un'analisi del sistema a quello stato e, successivamente, verrà descritto il passaggio da \textit{NextPyter "1.0"} a \textit{NextPyter "2.0"}, che rappresenta lo stato del progetto alla stesura di questa tesi. 
 \section{Obiettivi di \textit{NextPyter}}
-In generale, \textit{NextPyter} vuole essere una piattaforma tramite la quale sia possibile condividere in maniera efficiente dati e codice a scopo di ricerca. Come si può intuire dal nome, per realizzare gli obiettivi posti, \textit{NextPyter} fa uso di \textit{Nextcloud}, per la gestione dei file, e di \textit{JupyterLab}, che accederà ai file gestiti da Nextcloud.
+In generale, \textit{NextPyter} vuole essere una piattaforma tramite la quale sia possibile condividere in maniera efficiente dati e codice a scopo di ricerca. 
+\newline
+Lo stack tecnologico utilizzato si basa principalmente su JupyterLab, ovviamente, come \textit{engine} per i notebook computazionali, Nextcloud come soluzione \textit{open-source} di \textit{storage self-hosted} e Docker/Kubernetes per la gestione dell'infrastruttura che collega i vari componenti.
+\newline
+La fusione di queste tecnologie permetterà l'esecuzione remota di notebook Jupyter, garantendo una serie di vantaggi non ignorabili per la ricerca: scalabilità dello \textit{storage}, computazione parallela con eventuale supporto per hardware specializzato (come le GPU), il tutto nella più totale privacy e sicurezza, poiché NextPyter nasce come piattaforma \textit{self-hosted}.
 
 \subsection{Containerizzazione}
 Il fondamento cardine di \textit{NextPyter}, per entrambe le versioni, è la \textit{containerizzazione}, ovvero la pratica di distribuire software mediante l'utilizzo di \textit{container}\footnote{https://en.wikipedia.org/wiki/Docker\_(software)}, generalmente Docker, ambienti di esecuzione completamente isolati rispetto al resto del sistema. 
